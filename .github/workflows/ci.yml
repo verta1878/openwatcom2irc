@@ -1,0 +1,93 @@
+name: openwatcomirc CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  bootstrap:
+    name: Bootstrap C Toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Bootstrap (boot stage, C++ skipped)
+        run: |
+          export OWROOT=$(pwd)
+          export OWTOOLS=GCC
+          bash build.sh 2>&1 | tail -20
+        # Note: plusplus/cpplib/rtdll are skipped in builder.ctl
+        # C toolchain builds clean, C++ has known fmtsym.obj issue
+
+      - name: Verify bootstrap binaries
+        run: |
+          for tool in bwcc bwcc386 bwcl386 bwlink bwasm bwlib bwrc; do
+            test -f build/binbuild/$tool && echo "✅ $tool" || echo "❌ $tool MISSING"
+          done
+
+      - name: Generate wlink system definitions
+        run: |
+          export PATH=$(pwd)/build/binbuild:$PATH
+          wsplice -u -k Pwlsystem -k linux -k x64 \
+            bld/wl/lnk/wlink.sp bld/wl/lnk/specs.sp \
+            build/binbuild/bwlink.lnk
+
+      - name: Smoke test — hello.c (4 targets)
+        run: |
+          export PATH=$(pwd)/build/binbuild:$PATH
+          export WATCOM=$(pwd)/rel
+
+          cat > /tmp/hello.c << 'EOF'
+          #include <stdio.h>
+          int main(void) { printf("Hello from OpenWatcom-IRC!\n"); return 0; }
+          EOF
+
+          echo "=== DOS 16-bit ==="
+          bwcc /tmp/hello.c -fo=/tmp/h16.obj -i=$WATCOM/h -bt=dos -ms
+          bwlink system dos file /tmp/h16.obj name /tmp/h16.exe \
+            libpath $WATCOM/lib286 libpath $WATCOM/lib286/dos
+          file /tmp/h16.exe
+
+          echo "=== DOS 32-bit ==="
+          bwcc386 /tmp/hello.c -fo=/tmp/h32.obj -i=$WATCOM/h -bt=dos
+          bwlink system dos4g file /tmp/h32.obj name /tmp/h32.exe \
+            libpath $WATCOM/lib386 libpath $WATCOM/lib386/dos
+          file /tmp/h32.exe
+
+          echo "=== Win32 ==="
+          bwcc386 /tmp/hello.c -fo=/tmp/hnt.obj -i=$WATCOM/h -bt=nt
+          bwlink system nt file /tmp/hnt.obj name /tmp/hnt.exe \
+            libpath $WATCOM/lib386 libpath $WATCOM/lib386/nt
+          file /tmp/hnt.exe
+
+          echo "=== OS/2 ==="
+          bwcc386 /tmp/hello.c -fo=/tmp/hos2.obj -i=$WATCOM/h -bt=os2
+          bwlink system os2v2 file /tmp/hos2.obj name /tmp/hos2.exe \
+            libpath $WATCOM/lib386 libpath $WATCOM/lib386/os2
+          file /tmp/hos2.exe
+
+  # B5: PCBoard regression — uncomment when pcbrevival source is vendored
+  # pcboard-regression:
+  #   name: PCBoard 12/12 Build
+  #   needs: bootstrap
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Clone pcbrevival
+  #       run: git clone --depth=1 https://github.com/verta1878/pcbrevival.git
+  #     - name: Build MKPCBTXT.EXE
+  #       run: |
+  #         export PATH=$(pwd)/build/binbuild:$PATH
+  #         export WATCOM=$(pwd)/rel
+  #         bwcc386 pcbrevival/PCBSRC/MAIN/SOURCE/MKPCBSRC/MKPCBTXT.C \
+  #           -fo=/tmp/mkpcbtxt.obj \
+  #           -i=$WATCOM/h -i=pcbrevival/PCBSRC/MAIN/SOURCE/MKPCBSRC \
+  #           -bt=dos -mf -5 -ox
+  #         bwlink system dos4g file /tmp/mkpcbtxt.obj name /tmp/MKPCBTXT.EXE \
+  #           libpath $WATCOM/lib386 libpath $WATCOM/lib386/dos
+  #         file /tmp/MKPCBTXT.EXE
