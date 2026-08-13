@@ -85,8 +85,9 @@ _exit:
 .global __CHK
 .type __CHK, @function
 __CHK:
-    /* Stack check — no-op for Linux (kernel handles stack growth) */
-    ret
+    /* Stack check — Watcom pushes stack size before calling.
+     * Pop the argument and return. Linux kernel handles stack growth. */
+    ret $8
 
 .global _cstart
 .type _cstart, @function  

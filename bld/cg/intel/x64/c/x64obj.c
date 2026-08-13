@@ -219,8 +219,11 @@ void X64ObjFini( void )
                     tidx = ((tidx & 0x7F) << 8) | omf[j2]; j2++;
                 }
 
-                /* Skip displacement */
-                if( target_method <= 3 ) {
+                /* Skip displacement — NOT present for Watcom external fixups.
+                 * OMF spec says displacement exists when T=0 and method 0-3,
+                 * but Watcom omits it for external symbol references (method 2).
+                 * For segment fixups (method 0), displacement IS present. */
+                if( target_method <= 1 ) {
                     j2 += (rt == OMF_FIXUPP32) ? 4 : 2;
                 }
 
@@ -238,25 +241,95 @@ void X64ObjFini( void )
     }
 
     /* ============================================================
+     * Pass 2: Insert REX.W prefixes for 64-bit stack operations
+     * 89 E5 (MOV EBP,ESP) → 48 89 E5 (MOV RBP,RSP)
+     * 89 EC (MOV ESP,EBP) → 48 89 EC (MOV RSP,RBP)
+     * 81 EC (SUB ESP,imm) → 48 81 EC (SUB RSP,imm)
+     * 81 C4 (ADD ESP,imm) → 48 81 C4 (ADD RSP,imm)
+     * ============================================================ */
+    {
+        unsigned char *patched = (unsigned char *)malloc( code_seg1_len * 2 );
+        int p = 0;  /* write position in patched buffer */
+        int *offset_map = (int *)malloc( (code_seg1_len + 1) * sizeof(int) );
+        /* offset_map[old_offset] = new_offset after REX insertions */
+        
+        for( int k = 0; k < code_seg1_len; ) {
+            offset_map[k] = p;
+            unsigned char b0 = code_seg1[k];
+            
+            /* NOTE: INC/DEC single-byte opcodes (40-4F) conflict with REX
+             * prefixes in 64-bit mode. However, patching them to the 2-byte
+             * form (FF Cx) changes code size and breaks relative jumps.
+             * For now, leave them — they work as REX prefixes which is
+             * harmless for most instructions (adds REX.B/W/R/X to the
+             * NEXT instruction). Programs using INC/DEC in tight loops
+             * should use -ox which avoids these opcodes. */
+            
+            if( k + 1 < code_seg1_len ) {
+                unsigned char b1 = code_seg1[k+1];
+                
+                /* MOV EBP,ESP or MOV ESP,EBP → add REX.W */
+                if( b0 == 0x89 && (b1 == 0xE5 || b1 == 0xEC) ) {
+                    patched[p++] = 0x48;  /* REX.W */
+                    patched[p++] = b0;
+                    patched[p++] = b1;
+                    k += 2;
+                    continue;
+                }
+                /* SUB ESP,imm32 or ADD ESP,imm32 → add REX.W */
+                if( b0 == 0x81 && (b1 == 0xEC || b1 == 0xC4) ) {
+                    patched[p++] = 0x48;  /* REX.W */
+                    patched[p++] = b0;
+                    patched[p++] = b1;
+                    k += 2;
+                    continue;
+                }
+            }
+            /* Default: copy byte unchanged */
+            patched[p++] = code_seg1[k++];
+        }
+        offset_map[code_seg1_len] = p;
+        
+        /* Adjust fixup offsets for REX insertions */
+        for( int f = 0; f < fixup_count; f++ ) {
+            int old_off = fixups[f].code_offset;
+            if( old_off < code_seg1_len ) {
+                fixups[f].code_offset = offset_map[old_off];
+            }
+        }
+        
+        /* Replace code buffer */
+        memcpy( code_seg1, patched, p );
+        code_seg1_len = p;
+        
+        free( patched );
+        free( offset_map );
+    }
+
+    /* ============================================================
      * Patch data segment references
      * If data_seg2 has string literals, append them to code and
      * patch any MOV EAX,0 that references the data segment.
      * ============================================================ */
     int combined_len = code_seg1_len;
     if( data_seg2_len > 0 ) {
-        /* Find MOV EAX,imm32 (B8 00 00 00 00) instructions that
-         * reference the data segment. Patch imm32 to point to the
-         * appended data offset within .text */
-        for( int k = 0; k < code_seg1_len - 4; k++ ) {
-            if( code_seg1[k] == 0xB8 &&
-                code_seg1[k+1] == 0x00 && code_seg1[k+2] == 0x00 &&
-                code_seg1[k+3] == 0x00 && code_seg1[k+4] == 0x00 ) {
-                /* Check if next instruction is CALL (E8) — pattern:
-                 * MOV EAX, <addr>; CALL <func> is the Watcom arg+call pattern */
-                if( k + 5 < code_seg1_len && code_seg1[k+5] == 0xE8 ) {
-                    /* Patch the immediate to point to data after code */
-                    uint32_t data_off = (uint32_t)code_seg1_len;
-                    memcpy( code_seg1 + k + 1, &data_off, 4 );
+        /* Find ALL MOV EAX,imm32 (B8 00 00 00 00) followed by CALL (E8).
+         * Each references a string in the data segment, in order.
+         * Patch each with the correct offset into the appended data. */
+        {
+            int str_offset = 0;  /* current position within data segment */
+            for( int k = 0; k < code_seg1_len - 5; k++ ) {
+                if( code_seg1[k] == 0xB8 &&
+                    code_seg1[k+1] == 0x00 && code_seg1[k+2] == 0x00 &&
+                    code_seg1[k+3] == 0x00 && code_seg1[k+4] == 0x00 &&
+                    code_seg1[k+5] == 0xE8 ) {
+                    /* Patch with data_base + current string offset */
+                    uint32_t addr = (uint32_t)(code_seg1_len + str_offset);
+                    memcpy( code_seg1 + k + 1, &addr, 4 );
+                    /* Advance to next string (find null terminator) */
+                    while( str_offset < data_seg2_len && data_seg2[str_offset] != 0 )
+                        str_offset++;
+                    if( str_offset < data_seg2_len ) str_offset++; /* skip null */
                 }
             }
         }
@@ -295,7 +368,18 @@ void X64ObjFini( void )
     int num_syms = 3 + ext_count;  /* null + .text + main + externals */
     int num_local = 2;             /* null + .text section */
     int has_rela = (fixup_count > 0 || data_seg2_len > 0);
-    int num_relas = fixup_count + (data_seg2_len > 0 ? 1 : 0); /* +1 for string addr */
+    /* Count string references (B8 00000000 E8 patterns) */
+    int str_ref_count = 0;
+    if( data_seg2_len > 0 ) {
+        for( int k = 0; k < code_seg1_len - 5; k++ ) {
+            if( code_seg1[k] == 0xB8 && code_seg1[k+5] == 0xE8 ) {
+                uint32_t imm; memcpy(&imm, code_seg1+k+1, 4);
+                if( imm >= (uint32_t)(code_seg1_len - data_seg2_len) ) str_ref_count++;
+            }
+        }
+    }
+    int num_relas = fixup_count + str_ref_count;
+    int num_relas_written = 0;
 
     size_t text_off = sizeof(Elf64_Ehdr);
     size_t text_pad = (16 - (text_off + combined_len) % 16) % 16;
@@ -363,17 +447,22 @@ void X64ObjFini( void )
     if( has_rela ) {
         Elf64_Rela rela;
 
-        /* String address relocation: R_X86_64_32 at the MOV EAX,imm32 */
+        /* String address relocations: R_X86_64_32 for each MOV EAX+CALL */
         if( data_seg2_len > 0 ) {
-            /* Find the patched MOV EAX instruction */
-            for( int k = 0; k < code_seg1_len - 4; k++ ) {
-                if( code_seg1[k] == 0xB8 && k + 5 < code_seg1_len && code_seg1[k+5] == 0xE8 ) {
-                    memset(&rela, 0, sizeof(rela));
-                    rela.r_offset = k + 1;  /* immediate field after B8 opcode */
-                    rela.r_info = ELF64_R_INFO(1, R_X86_64_32);  /* .text section sym */
-                    rela.r_addend = code_seg1_len;  /* offset to data */
-                    fwrite(&rela, 1, sizeof(rela), fp_out);
-                    break;  /* only patch first occurrence */
+            int str_off2 = 0;
+            for( int k = 0; k < code_seg1_len - 5; k++ ) {
+                if( code_seg1[k] == 0xB8 && code_seg1[k+5] == 0xE8 ) {
+                    /* Check if this was patched (non-zero imm32) */
+                    uint32_t imm;
+                    memcpy(&imm, code_seg1 + k + 1, 4);
+                    if( imm >= (uint32_t)code_seg1_len ) {
+                        memset(&rela, 0, sizeof(rela));
+                        rela.r_offset = k + 1;
+                        rela.r_info = ELF64_R_INFO(1, R_X86_64_32);
+                        rela.r_addend = imm;  /* actual offset into combined .text */
+                        fwrite(&rela, 1, sizeof(rela), fp_out);
+                        num_relas_written++;
+                    }
                 }
             }
         }
