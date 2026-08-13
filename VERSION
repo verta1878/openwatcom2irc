@@ -4,4 +4,5 @@ Base: open-watcom/open-watcom-v2 @ d44c56f4
 
 9 targets verified, zero regressions.
 ELF64 relocations (FIXUPP32 → R_X86_64_PLT32/R_X86_64_32).
+Dynamic SEGDEF lookup (fixes 0-byte output on multi-segment files).
 Hello world runs. No gcc, no libc.

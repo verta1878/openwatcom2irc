@@ -94,6 +94,66 @@ void X64ObjFini( void )
     data_seg2 = (unsigned char *)malloc( omf_size );
 
     /* ============================================================
+     * Pass 0: Find _TEXT and _DATA segment indices from SEGDEF/LNAMES
+     * ============================================================ */
+    int text_seg_idx = 1;   /* default: first segment is _TEXT */
+    int data_seg_idx = -1;  /* no data segment by default */
+    {
+        /* Parse LNAMES to build name table */
+        char *lnames[64]; int lname_count = 0;
+        lnames[lname_count++] = ""; /* index 0 = empty */
+        int ti = 0;
+        while( ti < omf_size && ti + 3 <= omf_size ) {
+            unsigned char trt = omf[ti];
+            int trl = omf[ti+1] | (omf[ti+2] << 8);
+            if( trt == 0x96 ) { /* LNAMES */
+                int tj = ti + 3, tend = ti + 3 + trl - 1;
+                while( tj < tend && lname_count < 64 ) {
+                    int tnl = omf[tj++];
+                    if( tnl > 0 && tj + tnl <= tend ) {
+                        char *tn = (char *)malloc(tnl+1);
+                        memcpy(tn, omf+tj, tnl); tn[tnl] = 0;
+                        lnames[lname_count++] = tn;
+                        tj += tnl;
+                    } else {
+                        lnames[lname_count++] = "";
+                    }
+                }
+            }
+            ti += 3 + trl;
+        }
+        /* Parse SEGDEF32 to map segment indices to names */
+        int seg_num = 0;
+        ti = 0;
+        while( ti < omf_size && ti + 3 <= omf_size ) {
+            unsigned char trt = omf[ti];
+            int trl = omf[ti+1] | (omf[ti+2] << 8);
+            if( trt == 0x99 ) { /* SEGDEF32 */
+                seg_num++;
+                int tj = ti + 3 + 1 + 4; /* skip attr + seg_len */
+                int name_idx = omf[tj];
+                int class_idx = omf[tj+1];
+                /* Check if this segment has class CODE */
+                if( class_idx > 0 && class_idx < lname_count ) {
+                    if( strcmp(lnames[class_idx], "CODE") == 0 ) {
+                        text_seg_idx = seg_num;
+                    } else if( strcmp(lnames[class_idx], "DATA") == 0 ) {
+                        if( name_idx > 0 && name_idx < lname_count &&
+                            strcmp(lnames[name_idx], "CONST") == 0 ) {
+                            data_seg_idx = seg_num; /* string literals */
+                        }
+                        if( data_seg_idx < 0 ) data_seg_idx = seg_num;
+                    }
+                }
+            }
+            ti += 3 + trl;
+        }
+        /* Free lnames (except index 0) */
+        for( int ln = 1; ln < lname_count; ln++ )
+            if( lnames[ln][0] ) free(lnames[ln]);
+    }
+
+    /* ============================================================
      * Pass 1: Parse OMF records — LEDATA, EXTDEF, FIXUPP32
      * ============================================================ */
     i = 0;
@@ -112,10 +172,10 @@ void X64ObjFini( void )
             if( seg_idx & 0x80 ) { seg_idx = ((seg_idx & 0x7F) << 8) | omf[i+4]; ds++; }
             dl = rec_len - (ds - (i+3)) - 1;
             if( dl > 0 && ds + dl <= omf_size ) {
-                if( seg_idx == 1 ) {
+                if( seg_idx == text_seg_idx ) {
                     memcpy( code_seg1 + code_seg1_len, omf + ds, dl );
                     code_seg1_len += dl;
-                } else if( seg_idx == 2 ) {
+                } else if( seg_idx == data_seg_idx || (data_seg_idx < 0 && seg_idx > text_seg_idx) ) {
                     memcpy( data_seg2 + data_seg2_len, omf + ds, dl );
                     data_seg2_len += dl;
                 }
@@ -381,9 +441,15 @@ void X64ObjFini( void )
 
     fclose(fp_out);
 
-    /* Replace OMF with ELF64 */
-    remove(obj_filename);
-    rename(temp_name, obj_filename);
+    /* Replace OMF with ELF64 (only if we have code) */
+    if( combined_len > 0 ) {
+        remove(obj_filename);
+        rename(temp_name, obj_filename);
+    } else {
+        /* No code extracted — keep the OMF, remove temp */
+        remove(temp_name);
+        fprintf(stderr, "x64obj: warning: no CODE segment found in OMF, keeping original\n");
+    }
 
     /* Cleanup */
     for( i = 0; i < ext_count; i++ ) free(ext_names[i]);
