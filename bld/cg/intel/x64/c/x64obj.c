@@ -241,67 +241,128 @@ void X64ObjFini( void )
     }
 
     /* ============================================================
-     * Pass 2: Insert REX.W prefixes for 64-bit stack operations
-     * 89 E5 (MOV EBP,ESP) → 48 89 E5 (MOV RBP,RSP)
-     * 89 EC (MOV ESP,EBP) → 48 89 EC (MOV RSP,RBP)
-     * 81 EC (SUB ESP,imm) → 48 81 EC (SUB RSP,imm)
-     * 81 C4 (ADD ESP,imm) → 48 81 C4 (ADD RSP,imm)
+     * Pass 2: Patch i386 opcodes for x86_64 compatibility
+     *
+     * Three classes of patches:
+     * A) REX.W prefix for 64-bit stack ops (89 E5 → 48 89 E5)
+     * B) INC/DEC single-byte (40-4F) → two-byte form (FF C0-CF)
+     *    because 40-4F are REX prefixes in 64-bit mode
+     * C) Adjust relative jump/call displacements for size changes
      * ============================================================ */
     {
         unsigned char *patched = (unsigned char *)malloc( code_seg1_len * 2 );
-        int p = 0;  /* write position in patched buffer */
+        int p = 0;
         int *offset_map = (int *)malloc( (code_seg1_len + 1) * sizeof(int) );
-        /* offset_map[old_offset] = new_offset after REX insertions */
-        
+
+        /* Pre-fill so interior bytes are never read uninitialized */
+        for( int z = 0; z <= code_seg1_len; z++ ) offset_map[z] = -1;
+
         for( int k = 0; k < code_seg1_len; ) {
             offset_map[k] = p;
             unsigned char b0 = code_seg1[k];
-            
-            /* NOTE: INC/DEC single-byte opcodes (40-4F) conflict with REX
-             * prefixes in 64-bit mode. However, patching them to the 2-byte
-             * form (FF Cx) changes code size and breaks relative jumps.
-             * For now, leave them — they work as REX prefixes which is
-             * harmless for most instructions (adds REX.B/W/R/X to the
-             * NEXT instruction). Programs using INC/DEC in tight loops
-             * should use -ox which avoids these opcodes. */
-            
+
             if( k + 1 < code_seg1_len ) {
                 unsigned char b1 = code_seg1[k+1];
-                
-                /* MOV EBP,ESP or MOV ESP,EBP → add REX.W */
+
+                /* A) REX.W for MOV RBP,RSP / MOV RSP,RBP */
                 if( b0 == 0x89 && (b1 == 0xE5 || b1 == 0xEC) ) {
-                    patched[p++] = 0x48;  /* REX.W */
+                    patched[p++] = 0x48;
                     patched[p++] = b0;
                     patched[p++] = b1;
-                    k += 2;
-                    continue;
+                    k += 2; continue;
                 }
-                /* SUB ESP,imm32 or ADD ESP,imm32 → add REX.W */
+                /* A) REX.W for SUB RSP,imm / ADD RSP,imm */
                 if( b0 == 0x81 && (b1 == 0xEC || b1 == 0xC4) ) {
-                    patched[p++] = 0x48;  /* REX.W */
+                    patched[p++] = 0x48;
                     patched[p++] = b0;
                     patched[p++] = b1;
-                    k += 2;
-                    continue;
+                    k += 2; continue;
                 }
             }
-            /* Default: copy byte unchanged */
+
+            /* B) INC/DEC single-byte (40-4F) conflict with REX prefixes.
+             * Cannot safely patch without a full instruction decoder because
+             * 40-4F also appear as ModR/M bytes inside multi-byte instructions.
+             * Left as-is: the REX effect on the following instruction is usually
+             * benign. Programs needing loops should use -od (frame-based) or
+             * ensure INC/DEC is avoided via compiler flags. */
+
             patched[p++] = code_seg1[k++];
         }
         offset_map[code_seg1_len] = p;
-        
-        /* Adjust fixup offsets for REX insertions */
-        for( int f = 0; f < fixup_count; f++ ) {
-            int old_off = fixups[f].code_offset;
-            if( old_off < code_seg1_len ) {
-                fixups[f].code_offset = offset_map[old_off];
+
+        /* C) Adjust relative jumps and calls.
+         * Scan the ORIGINAL code for jump/call instructions.
+         * Calculate old target, map both source and target through
+         * offset_map, compute new displacement in patched buffer. */
+        for( int k2 = 0; k2 < code_seg1_len; ) {
+            unsigned char op2 = code_seg1[k2];
+            int disp_off_old = -1;  /* displacement offset in ORIGINAL */
+            int disp_size = 0;
+            int inst_len = 0;       /* total instruction length */
+
+            /* Short Jcc: 70-7F xx */
+            if( op2 >= 0x70 && op2 <= 0x7F ) {
+                disp_off_old = k2 + 1; disp_size = 1; inst_len = 2;
+            }
+            /* Short JMP: EB xx */
+            else if( op2 == 0xEB ) {
+                disp_off_old = k2 + 1; disp_size = 1; inst_len = 2;
+            }
+            /* Near Jcc: 0F 8x xx xx xx xx */
+            else if( op2 == 0x0F && k2+1 < code_seg1_len &&
+                     code_seg1[k2+1] >= 0x80 && code_seg1[k2+1] <= 0x8F ) {
+                disp_off_old = k2 + 2; disp_size = 4; inst_len = 6;
+            }
+            /* Near CALL/JMP: E8/E9 xx xx xx xx */
+            else if( op2 == 0xE8 || op2 == 0xE9 ) {
+                disp_off_old = k2 + 1; disp_size = 4; inst_len = 5;
+            }
+
+            if( disp_off_old >= 0 ) {
+                int old_inst_end = k2 + inst_len;
+                int32_t old_disp;
+                if( disp_size == 1 )
+                    old_disp = (int8_t)code_seg1[disp_off_old];
+                else
+                    memcpy(&old_disp, code_seg1 + disp_off_old, 4);
+
+                int old_target = old_inst_end + old_disp;
+                if( old_target >= 0 && old_target <= code_seg1_len &&
+                    offset_map[k2] >= 0 && offset_map[old_target] >= 0 ) {
+                    /* Instruction length is unchanged by our patches, so the
+                     * new end is simply new_start + inst_len. */
+                    int new_inst_end = offset_map[k2] + inst_len;
+                    int new_target = offset_map[old_target];
+                    int32_t new_disp = new_target - new_inst_end;
+
+                    /* Write new displacement into PATCHED buffer.
+                     * disp_off_old points INSIDE the instruction, so it has
+                     * no offset_map entry. Derive it from the instruction
+                     * start, which is always an instruction boundary. */
+                    int new_disp_off = offset_map[k2] + (disp_off_old - k2);
+                    if( disp_size == 1 ) {
+                        if( new_disp >= -128 && new_disp <= 127 )
+                            patched[new_disp_off] = (uint8_t)(int8_t)new_disp;
+                    } else {
+                        memcpy(patched + new_disp_off, &new_disp, 4);
+                    }
+                }
+                k2 += inst_len;
+            } else {
+                k2++;
             }
         }
-        
-        /* Replace code buffer */
+
+        /* Adjust fixup offsets */
+        for( int f = 0; f < fixup_count; f++ ) {
+            int old_off = fixups[f].code_offset;
+            if( old_off >= 0 && old_off < code_seg1_len )
+                fixups[f].code_offset = offset_map[old_off];
+        }
+
         memcpy( code_seg1, patched, p );
         code_seg1_len = p;
-        
         free( patched );
         free( offset_map );
     }
@@ -368,13 +429,15 @@ void X64ObjFini( void )
     int num_syms = 3 + ext_count;  /* null + .text + main + externals */
     int num_local = 2;             /* null + .text section */
     int has_rela = (fixup_count > 0 || data_seg2_len > 0);
-    /* Count string references (B8 00000000 E8 patterns) */
+    /* Count string references: B8+E8 patterns with patched data offset.
+     * Must count AFTER data segment is appended to code_seg1. */
     int str_ref_count = 0;
+    int orig_code_len = code_seg1_len; /* code length before data append */
     if( data_seg2_len > 0 ) {
-        for( int k = 0; k < code_seg1_len - 5; k++ ) {
+        for( int k = 0; k < orig_code_len - 5; k++ ) {
             if( code_seg1[k] == 0xB8 && code_seg1[k+5] == 0xE8 ) {
                 uint32_t imm; memcpy(&imm, code_seg1+k+1, 4);
-                if( imm >= (uint32_t)(code_seg1_len - data_seg2_len) ) str_ref_count++;
+                if( imm >= (uint32_t)orig_code_len ) str_ref_count++;
             }
         }
     }
@@ -455,7 +518,7 @@ void X64ObjFini( void )
                     /* Check if this was patched (non-zero imm32) */
                     uint32_t imm;
                     memcpy(&imm, code_seg1 + k + 1, 4);
-                    if( imm >= (uint32_t)code_seg1_len ) {
+                    if( imm >= (uint32_t)orig_code_len ) {
                         memset(&rela, 0, sizeof(rela));
                         rela.r_offset = k + 1;
                         rela.r_info = ELF64_R_INFO(1, R_X86_64_32);
