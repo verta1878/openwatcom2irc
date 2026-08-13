@@ -1,16 +1,7 @@
 openwatcom2irc r0.6.0
-Date: 2026-08-13 06:00 UTC
+Date: 2026-08-13
 Base: open-watcom/open-watcom-v2 @ d44c56f4
 
-9 targets verified, zero regressions:
-  DOS 16-bit     -bt=dos (bwcc)       OMF i86    ✅
-  DOS 32-bit     -bt=dos (bwcc386)    OMF i386   ✅
-  DOS4G          -bt=dos4g            OMF i386   ✅
-  DOS4GNZ        -bt=dos4gnz          OMF i386   ✅
-  Pharlap 386    -bt=pharlap          OMF i386   ✅
-  OS/2 16-bit    -bt=os2 (bwcc)       OMF i86    ✅
-  OS/2 32-bit    -bt=os2 (bwcc386)    OMF i386   ✅
-  Win32          -bt=nt               OMF i386   ✅
-  Linux x64      -bt=linux64          ELF64      ✅ runs
-
-Gate: return 42 runs, hello world runs. No gcc, no libc.
+9 targets verified, zero regressions.
+ELF64 relocations (FIXUPP32 → R_X86_64_PLT32/R_X86_64_32).
+Hello world runs. No gcc, no libc.
