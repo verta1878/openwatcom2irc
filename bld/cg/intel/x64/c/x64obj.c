@@ -1,3 +1,4 @@
+#include <stdio.h>
 /*
  * openwatcom2irc — OMF → ELF64 post-processor (r0.7.0)
  *
@@ -12,11 +13,191 @@
 #include "coderep.h"
 #include "pcencode.h"
 #include "feprotos.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <elf.h>
+
+/* ------------------------------------------------------------------
+ * Minimal x86-32 instruction length decoder.
+ *
+ * The jump/call adjustment pass must only inspect real instruction
+ * boundaries. Walking the stream one byte at a time lets a ModRM or
+ * displacement byte be mistaken for an opcode -- e.g. "lea -0x20(%rbp),%edi"
+ * is 8D 7D E0, and 0x7D falls inside the short-Jcc range 0x70-0x7F, so the
+ * scanner would rewrite the LEA displacement as if it were a branch target.
+ *
+ * Covers what the Watcom 386 code generator actually emits. Returns the
+ * instruction length in bytes, or 1 if the opcode is unrecognised (which
+ * degrades to the old behaviour rather than desynchronising further).
+ * ------------------------------------------------------------------ */
+static int modrm_len( const unsigned char *c, int max, int start )
+{
+    /* start = index of the ModRM byte. Returns bytes consumed by
+     * ModRM + optional SIB + optional displacement. */
+    int n;
+    unsigned char modrm;
+    int mod, rm;
+
+    if( start >= max )
+        return( 1 );
+    modrm = c[start];
+    mod = (modrm >> 6) & 3;
+    rm  = modrm & 7;
+    n = 1;                              /* the ModRM byte itself */
+    if( mod != 3 && rm == 4 ) {         /* SIB present */
+        if( start + n < max ) {
+            unsigned char sib = c[start + n];
+            n++;
+            if( mod == 0 && (sib & 7) == 5 )
+                n += 4;                 /* disp32, no base */
+        } else {
+            n++;
+        }
+    }
+    if( mod == 1 ) {
+        n += 1;                         /* disp8 */
+    } else if( mod == 2 ) {
+        n += 4;                         /* disp32 */
+    } else if( mod == 0 && rm == 5 ) {
+        n += 4;                         /* disp32 / RIP-relative */
+    }
+    return( n );
+}
+
+static int x86_insn_len( const unsigned char *c, int max, int pos )
+{
+    int i = pos;
+    int opsize32 = 1;
+
+    if( pos >= max )
+        return( 1 );
+
+    /* prefixes */
+    for( ;; ) {
+        unsigned char b;
+        if( i >= max )
+            return( i - pos > 0 ? i - pos : 1 );
+        b = c[i];
+        if( b == 0x66 ) { opsize32 = 0; i++; continue; }
+        if( b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3
+         || b == 0x26 || b == 0x2E || b == 0x36 || b == 0x3E
+         || b == 0x64 || b == 0x65 ) { i++; continue; }
+        if( b >= 0x40 && b <= 0x4F ) break;   /* INC/DEC on 386, not REX */
+        break;
+    }
+
+    if( i >= max )
+        return( 1 );
+
+    {
+        unsigned char op = c[i];
+
+        /* two-byte opcodes */
+        if( op == 0x0F ) {
+            unsigned char op2;
+            if( i + 1 >= max ) return( i + 1 - pos );
+            op2 = c[i+1];
+            i += 2;
+            if( op2 >= 0x80 && op2 <= 0x8F )        /* near Jcc rel32 */
+                return( i + 4 - pos );
+            if( op2 >= 0x90 && op2 <= 0x9F )        /* SETcc r/m8 */
+                return( i + modrm_len(c, max, i) - pos );
+            /* MOVZX/MOVSX/IMUL/BT.. all ModRM forms */
+            return( i + modrm_len(c, max, i) - pos );
+        }
+
+        /* one-byte, no operand */
+        if( (op >= 0x40 && op <= 0x5F)          /* INC/DEC/PUSH/POP reg */
+         || (op >= 0x90 && op <= 0x99)
+         || op == 0xC3 || op == 0xC9 || op == 0xCC
+         || (op >= 0xF8 && op <= 0xFD)
+         || (op >= 0xA4 && op <= 0xA7)          /* MOVS/CMPS */
+         || (op >= 0xAA && op <= 0xAF) ) {      /* STOS/LODS/SCAS */
+            return( i + 1 - pos );
+        }
+
+        /* ModRM, no immediate */
+        if( (op <= 0x3F && (op & 7) <= 3)       /* arith r/m,r and r,r/m */
+         || op == 0x84 || op == 0x85            /* TEST */
+         || op == 0x86 || op == 0x87            /* XCHG */
+         || (op >= 0x88 && op <= 0x8B)          /* MOV */
+         || op == 0x8C || op == 0x8E            /* MOV Sreg */
+         || op == 0x8D                          /* LEA */
+         || op == 0x8F                          /* POP r/m */
+         || op == 0x63                          /* ARPL / MOVSXD */
+         || (op >= 0xD0 && op <= 0xD3)          /* shift by 1/CL */
+         || (op >= 0xD8 && op <= 0xDF)          /* x87 FPU — all ModRM */
+         || op == 0xFE || op == 0xFF ) {        /* INC/DEC/CALL/JMP/PUSH r/m */
+            return( i + 1 + modrm_len(c, max, i + 1) - pos );
+        }
+
+        /* ENTER imm16,imm8 */
+        if( op == 0xC8 ) return( i + 4 - pos );
+        /* AAM/AAD imm8 */
+        if( op == 0xD4 || op == 0xD5 ) return( i + 2 - pos );
+        /* far CALL/JMP ptr16:32 */
+        if( op == 0x9A || op == 0xEA ) return( i + 7 - pos );
+        /* IN/OUT imm8 */
+        if( op >= 0xE4 && op <= 0xE7 ) return( i + 2 - pos );
+        /* PUSHA/POPA/WAIT/PUSHF/POPF/SAHF/LAHF and IN/OUT DX forms */
+        if( op == 0x60 || op == 0x61 || (op >= 0x9B && op <= 0x9F)
+         || (op >= 0xEC && op <= 0xEF) ) return( i + 1 - pos );
+
+        /* ModRM + imm8 */
+        if( op == 0x80 || op == 0x83 || op == 0x6B
+         || op == 0xC0 || op == 0xC1 || op == 0xC6 ) {
+            return( i + 1 + modrm_len(c, max, i + 1) + 1 - pos );
+        }
+
+        /* ModRM + imm16/32 */
+        if( op == 0x81 || op == 0x69 || op == 0xC7 ) {
+            return( i + 1 + modrm_len(c, max, i + 1) + (opsize32 ? 4 : 2) - pos );
+        }
+
+        /* F6/F7: TEST has an immediate, the rest do not */
+        if( op == 0xF6 || op == 0xF7 ) {
+            int ml = modrm_len(c, max, i + 1);
+            int reg = ( i + 1 < max ) ? ((c[i+1] >> 3) & 7) : 0;
+            int imm = 0;
+            if( reg == 0 || reg == 1 )
+                imm = ( op == 0xF6 ) ? 1 : (opsize32 ? 4 : 2);
+            return( i + 1 + ml + imm - pos );
+        }
+
+        /* accumulator forms with immediate */
+        if( op <= 0x3F && (op & 7) == 4 ) return( i + 2 - pos );          /* imm8 */
+        if( op <= 0x3F && (op & 7) == 5 ) return( i + 1 + (opsize32?4:2) - pos );
+        if( op == 0xA8 ) return( i + 2 - pos );                            /* TEST al,imm8 */
+        if( op == 0xA9 ) return( i + 1 + (opsize32?4:2) - pos );
+
+        /* MOV reg,imm */
+        if( op >= 0xB0 && op <= 0xB7 ) return( i + 2 - pos );
+        if( op >= 0xB8 && op <= 0xBF ) return( i + 1 + (opsize32?4:2) - pos );
+
+        /* MOV moffs */
+        if( op >= 0xA0 && op <= 0xA3 ) return( i + 1 + 4 - pos );
+
+        /* PUSH imm */
+        if( op == 0x6A ) return( i + 2 - pos );
+        if( op == 0x68 ) return( i + 1 + (opsize32?4:2) - pos );
+
+        /* branches */
+        if( op >= 0x70 && op <= 0x7F ) return( i + 2 - pos );   /* Jcc rel8 */
+        if( op == 0xEB ) return( i + 2 - pos );                 /* JMP rel8 */
+        if( op == 0xE0 || op == 0xE1 || op == 0xE2 || op == 0xE3 )
+            return( i + 2 - pos );                              /* LOOP/JCXZ */
+        if( op == 0xE8 || op == 0xE9 ) return( i + 5 - pos );    /* CALL/JMP rel32 */
+
+        /* RET imm16 */
+        if( op == 0xC2 || op == 0xCA ) return( i + 3 - pos );
+
+        /* INT imm8 */
+        if( op == 0xCD ) return( i + 2 - pos );
+    }
+
+    return( 1 );    /* unknown: fall back to old behaviour */
+}
 
 static char *obj_filename;
 static bool  x64_active;
@@ -31,8 +212,11 @@ static bool  x64_active;
 /* Fixup record */
 typedef struct {
     int code_offset;    /* offset within code segment */
-    int ext_idx;        /* index into ext_names[] */
+    int ext_idx;        /* index into ext_names[], or -1 for a data reference */
+    int target_seg;     /* for data references: the OMF segment referred to */
 } fixup_rec;
+
+static int *fixup_orig_off = NULL;
 
 void X64ObjInit( void )
 {
@@ -53,14 +237,31 @@ void X64ObjFini( void )
     /* Collected data */
     unsigned char *code_seg1 = NULL;    /* code segment */
     int code_seg1_len = 0;
-    unsigned char *data_seg2 = NULL;    /* data segment (string literals) */
+    unsigned char *data_seg2 = NULL;    /* all data-class segments, packed */
     int data_seg2_len = 0;
+    /* Where each OMF segment index begins inside data_seg2. A module has
+     * several data segments (CONST, CONST2, _DATA); packing only one of
+     * them silently dropped initialisers. */
+    static int  seg_base[512];
+    static char seg_is_data[512];
+    static char seg_is_bss[512];
+    int  seg_bss_base[512];      /* offset of each BSS segment within .bss */
+    static unsigned int seg_len[512];   /* SEGDEF length, the only size BSS has */
+    int  bss_total = 0;
 
-    char *ext_names[64];
+    static char *ext_names[512];
     int ext_count = 0;
 
-    fixup_rec fixups[256];
+    static char *pub_names[512];
+    static unsigned int pub_offs[512];
+    static int pub_segs[512];
+    static int pub_local[512];
+    int pub_count = 0;
+
+    static fixup_rec fixups[2048];
     int fixup_count = 0;
+    static fixup_rec dfixups[2048];      /* fixups that patch the data image */
+    int dfixup_count = 0;
 
     if( !x64_active || !obj_filename ) return;
 
@@ -98,9 +299,13 @@ void X64ObjFini( void )
      * ============================================================ */
     int text_seg_idx = 1;   /* default: first segment is _TEXT */
     int data_seg_idx = -1;  /* no data segment by default */
+    for( int z = 0; z < 64; z++ ) {
+        seg_base[z] = -1; seg_is_data[z] = 0;
+        seg_is_bss[z] = 0; seg_bss_base[z] = -1; seg_len[z] = 0;
+    }
     {
         /* Parse LNAMES to build name table */
-        char *lnames[64]; int lname_count = 0;
+        char *lnames[512]; int lname_count = 0;
         lnames[lname_count++] = ""; /* index 0 = empty */
         int ti = 0;
         while( ti < omf_size && ti + 3 <= omf_size ) {
@@ -130,11 +335,23 @@ void X64ObjFini( void )
             int trl = omf[ti+1] | (omf[ti+2] << 8);
             if( trt == 0x99 ) { /* SEGDEF32 */
                 seg_num++;
+                unsigned int slen = omf[ti+4] | (omf[ti+5]<<8) |
+                                    (omf[ti+6]<<16) | (omf[ti+7]<<24);
+                if( seg_num < 64 ) seg_len[seg_num] = slen;
                 int tj = ti + 3 + 1 + 4; /* skip attr + seg_len */
                 int name_idx = omf[tj];
                 int class_idx = omf[tj+1];
                 /* Check if this segment has class CODE */
                 if( class_idx > 0 && class_idx < lname_count ) {
+                    if( seg_num < 64 ) {
+                        seg_is_data[seg_num] =
+                            ( strcmp(lnames[class_idx], "DATA") == 0 );
+                        /* BSS carries no LEDATA at all; its size comes only
+                         * from SEGDEF. Without this, uninitialised globals
+                         * had no storage and every access faulted. */
+                        seg_is_bss[seg_num] =
+                            ( strcmp(lnames[class_idx], "BSS") == 0 );
+                    }
                     if( strcmp(lnames[class_idx], "CODE") == 0 ) {
                         text_seg_idx = seg_num;
                     } else if( strcmp(lnames[class_idx], "DATA") == 0 ) {
@@ -148,6 +365,13 @@ void X64ObjFini( void )
             }
             ti += 3 + trl;
         }
+        for( int z = 1; z < 64; z++ ) {
+            if( seg_is_bss[z] && seg_len[z] > 0 ) {
+                seg_bss_base[z] = bss_total;
+                bss_total += (int)seg_len[z];
+            }
+        }
+
         /* Free lnames (except index 0) */
         for( int ln = 1; ln < lname_count; ln++ )
             if( lnames[ln][0] ) free(lnames[ln]);
@@ -175,14 +399,56 @@ void X64ObjFini( void )
                 if( seg_idx == text_seg_idx ) {
                     memcpy( code_seg1 + code_seg1_len, omf + ds, dl );
                     code_seg1_len += dl;
-                } else if( seg_idx == data_seg_idx || (data_seg_idx < 0 && seg_idx > text_seg_idx) ) {
+                } else if( seg_idx > 0 && seg_idx < 512 && seg_is_data[seg_idx] ) {
+                    if( seg_base[seg_idx] < 0 )
+                        seg_base[seg_idx] = data_seg2_len;
                     memcpy( data_seg2 + data_seg2_len, omf + ds, dl );
                     data_seg2_len += dl;
                 }
             }
         }
+        /* --- PUBDEF / PUBDEF32: exported symbols with real offsets --- */
+        else if( (rt == 0x91 || rt == 0x90 || rt == 0xB7 || rt == 0xB6)
+                 && pub_count < 64 ) {
+            /* 0xB6/0xB7 are LPUBDEF: file-scope (static) symbols. They carry
+             * the same payload as PUBDEF but bind locally. Skipping them left
+             * statics with no symbol at all. */
+            int is_local = ( rt == 0xB6 || rt == 0xB7 );
+            int wide     = ( rt == 0x91 || rt == 0xB7 );
+            int j = i + 3, end = i + 3 + rec_len - 1;
+            int base_grp = omf[j++];       /* group index */
+            int base_seg = omf[j++];       /* segment index */
+            (void)base_grp;
+            if( base_seg == 0 ) j += 2;    /* frame number when seg == 0 */
+            while( j < end && pub_count < 64 ) {
+                int nl = omf[j++];
+                if( nl <= 0 || j + nl > end ) break;
+                char *n = (char *)malloc(nl+1);
+                memcpy(n, omf+j, nl); n[nl] = 0;
+                if( nl > 1 && n[nl-1] == '_' ) n[nl-1] = 0;  /* Watcom suffix */
+                j += nl;
+                unsigned int off;
+                if( wide ) {
+                    off = omf[j] | (omf[j+1]<<8) | (omf[j+2]<<16) | (omf[j+3]<<24);
+                    j += 4;
+                } else {
+                    off = omf[j] | (omf[j+1]<<8);
+                    j += 2;
+                }
+                if( j < end ) j++;         /* type index */
+                pub_names[pub_count] = n;
+                pub_offs[pub_count] = off;
+                pub_segs[pub_count] = base_seg;
+                pub_local[pub_count] = is_local;
+                pub_count++;
+            }
+        }
         /* --- EXTDEF --- */
-        else if( rt == OMF_EXTDEF && ext_count < 64 ) {
+        else if( (rt == OMF_EXTDEF || rt == 0xB4) && ext_count < 64 ) {
+            /* 0xB4 is LEXTDEF, the file-scope counterpart of EXTDEF. Both
+             * feed the same external index space that FIXUPP targets refer
+             * to, so collecting only EXTDEF shifted every index by one and
+             * pointed static-data references at the wrong symbol. */
             int j = i + 3, end = i + 3 + rec_len - 1;
             while( j < end && ext_count < 64 ) {
                 int nl = omf[j++];
@@ -196,8 +462,54 @@ void X64ObjFini( void )
                 if( j < end ) j++; /* type index */
             }
         }
-        /* --- FIXUPP32 --- */
-        else if( (rt == OMF_FIXUPP32 || rt == OMF_FIXUPP) && fixup_count < 256 ) {
+        i += 3 + rec_len;
+    }
+
+    /* ------------------------------------------------------------------
+     * Pass 1b: relocations.
+     * FIXUPP records reference externals by index, and Watcom does not
+     * guarantee the EXTDEF appears earlier in the file than the FIXUPP that
+     * uses it. Resolving them in the same linear pass silently discarded
+     * every fixup whose EXTDEF came later, which stripped all relocations
+     * from such objects. Do them once the name tables are complete.
+     * ------------------------------------------------------------------ */
+    i = 0;
+    int cur_chunk_base = 0;   /* where the current text LEDATA landed */
+    int run_text = 0;         /* running total of text bytes seen */
+    int cur_chunk_is_text = 1;
+    int cur_dchunk_base = 0;     /* where the current data LEDATA landed */
+    int seg_packed[512];          /* bytes of each data segment already packed */
+    for( int z = 0; z < 64; z++ ) seg_packed[z] = 0;
+    while( i < omf_size && i + 3 <= omf_size ) {
+        unsigned char rt = omf[i];
+        rec_len = omf[i+1] | (omf[i+2] << 8);
+
+        /* A FIXUPP offset is relative to the LEDATA record it follows, not to
+         * the segment. With more than one LEDATA chunk the later chunks'
+         * fixups were being applied near the start of .text, corrupting
+         * unrelated instructions and producing nonsense addends. */
+        if( rt == OMF_LEDATA32 || rt == OMF_LEDATA ) {
+            int sidx = omf[i+3];
+            int ds2, dl2;
+            if( rt == OMF_LEDATA32 ) ds2 = i + 3 + 1 + 4;
+            else                     ds2 = i + 3 + 1 + 2;
+            if( sidx & 0x80 ) { sidx = ((sidx & 0x7F) << 8) | omf[i+4]; ds2++; }
+            dl2 = rec_len - (ds2 - (i+3)) - 1;
+            cur_chunk_is_text = ( sidx == text_seg_idx );
+            if( cur_chunk_is_text && dl2 > 0 ) {
+                cur_chunk_base = run_text;
+                run_text += dl2;
+            } else if( !cur_chunk_is_text && sidx > 0 && sidx < 512 &&
+                       seg_is_data[sidx] && seg_base[sidx] >= 0 ) {
+                /* Like text, a data fixup offset is relative to its own
+                 * LEDATA record, so track where each chunk was packed
+                 * rather than assuming one chunk per segment. */
+                cur_dchunk_base = seg_base[sidx] + seg_packed[sidx];
+                if( dl2 > 0 ) seg_packed[sidx] += dl2;
+            }
+        }
+
+        if( (rt == OMF_FIXUPP32 || rt == OMF_FIXUPP) && fixup_count < 256 ) {
             int j = i + 3, end = i + 3 + rec_len - 1;
             while( j < end && fixup_count < 256 ) {
                 unsigned char hi = omf[j], lo = omf[j+1];
@@ -219,18 +531,44 @@ void X64ObjFini( void )
                     tidx = ((tidx & 0x7F) << 8) | omf[j2]; j2++;
                 }
 
-                /* Skip displacement — NOT present for Watcom external fixups.
-                 * OMF spec says displacement exists when T=0 and method 0-3,
-                 * but Watcom omits it for external symbol references (method 2).
-                 * For segment fixups (method 0), displacement IS present. */
-                if( target_method <= 1 ) {
+                /* Fix Dat layout:  F(1) Frame(3) T(1) P(1) Targt(2)
+                 * The target displacement is present only when P (bit 2)
+                 * is clear. Watcom sets P for both segment and external
+                 * references, so in practice no displacement follows. */
+                if( ((fix_dat >> 2) & 1) == 0 ) {
                     j2 += (rt == OMF_FIXUPP32) ? 4 : 2;
                 }
 
-                /* Record external fixup */
+                /* Record the fixup. ext_idx >= 0 means an external symbol
+                 * reference; ext_idx == -1 marks a segment-relative data
+                 * reference (a string/global address) which we resolve
+                 * against the data we append to .text. */
+                if( !cur_chunk_is_text ) {
+                    /* Patches the data image — a pointer initialiser such as
+                     * `struct D d1 = { 1, "d1", &d2 };`. These become
+                     * .rela.data entries anchored on the target section,
+                     * mirroring what a known-good x86-64 toolchain emits. */
+                    if( dfixup_count < 256 ) {
+                        dfixups[dfixup_count].code_offset = cur_dchunk_base + offset;
+                        dfixups[dfixup_count].ext_idx =
+                            ( target_method == 2 && tidx > 0 && tidx <= ext_count )
+                            ? tidx - 1 : -1;
+                        dfixups[dfixup_count].target_seg =
+                            ( target_method == 2 ) ? 0 : tidx;
+                        dfixup_count++;
+                    }
+                    j = j2;
+                    continue;
+                }
                 if( target_method == 2 && tidx > 0 && tidx <= ext_count ) {
-                    fixups[fixup_count].code_offset = offset;
+                    fixups[fixup_count].code_offset = cur_chunk_base + offset;
                     fixups[fixup_count].ext_idx = tidx - 1;
+                    fixups[fixup_count].target_seg = 0;
+                    fixup_count++;
+                } else if( target_method == 0 || target_method == 1 ) {
+                    fixups[fixup_count].code_offset = cur_chunk_base + offset;
+                    fixups[fixup_count].ext_idx = -1;
+                    fixups[fixup_count].target_seg = tidx;
                     fixup_count++;
                 }
                 j = j2;
@@ -239,6 +577,7 @@ void X64ObjFini( void )
 
         i += 3 + rec_len;
     }
+
 
     /* ============================================================
      * Pass 2: Patch i386 opcodes for x86_64 compatibility
@@ -250,7 +589,7 @@ void X64ObjFini( void )
      * C) Adjust relative jump/call displacements for size changes
      * ============================================================ */
     {
-        unsigned char *patched = (unsigned char *)malloc( code_seg1_len * 2 );
+        unsigned char *patched = (unsigned char *)malloc( code_seg1_len * 3 );  /* 3x for REX.W expansion */
         int p = 0;
         int *offset_map = (int *)malloc( (code_seg1_len + 1) * sizeof(int) );
 
@@ -271,12 +610,93 @@ void X64ObjFini( void )
                     patched[p++] = b1;
                     k += 2; continue;
                 }
+                /* A4) REX.W for all register-to-register MOV (mod=11).
+                 * On x64, reg-reg MOVs must be 64-bit to preserve
+                 * pointer values in the upper 32 bits. */
+                if( (b0 == 0x89 || b0 == 0x8B) && (b1 & 0xC0) == 0xC0 ) {
+                    patched[p++] = 0x48; patched[p++] = b0; patched[p++] = b1;
+                    k += 2; continue;
+                }
+                /* A5) REX.W for LEA when RSP/RBP is destination OR base.
+                 * 8D with reg=ESP(4)/EBP(5) is a stack-pointer destination.
+                 * 8D with mod!=11 and rm=EBP(5)/ESP(4) computes an address
+                 * from the frame pointer — the result is a pointer, so the
+                 * destination must be 64-bit or RBP gets truncated. */
+                /* REX.W for LEA when RSP/RBP is the destination OR the base. */
+                if( b0 == 0x8D ) {
+                    int lreg = (b1 >> 3) & 7;
+                    int lmod = (b1 >> 6) & 3;
+                    int lrm  = b1 & 7;
+                    if( lreg == 4 || lreg == 5
+                      || ( lmod != 3 && ( lrm == 5 || lrm == 4 ) ) ) {
+                        patched[p++] = 0x48; /* fall through to copy */
+                    }
+                }
+
                 /* A) REX.W for SUB RSP,imm / ADD RSP,imm */
-                if( b0 == 0x81 && (b1 == 0xEC || b1 == 0xC4) ) {
+                if( (b0 == 0x81 || b0 == 0x83) && (b1 == 0xEC || b1 == 0xC4) ) {
                     patched[p++] = 0x48;
                     patched[p++] = b0;
                     patched[p++] = b1;
                     k += 2; continue;
+                }
+
+            }
+
+            /* A3) Consecutive PUSH imm32 for double parameter passing.
+             * On i386, two 'push imm32' push 4+4=8 bytes (one double).
+             * On x64, each push extends to 8 bytes → 16 bytes total.
+             * Rewrite to: sub rsp,8 + mov [rsp],low + mov [rsp+4],high
+             * Pattern: 68 hh hh hh hh [68 ll ll ll ll | 6A ll] */
+            if( b0 == 0x68 && k + 5 < code_seg1_len ) {
+                unsigned char next_op = code_seg1[k+5];
+                /* Only convert push+push to sub+mov+mov for double constants.
+                 * Skip if either push has a fixup (= address relocation).
+                 * cdecl arg pushes have fixups; double constants don't. */
+                int push1_has_fixup = 0, push2_has_fixup = 0;
+                for( int f = 0; f < fixup_count; f++ ) {
+                    if( fixups[f].code_offset == k + 1 ) push1_has_fixup = 1;
+                    if( fixups[f].code_offset == k + 6 ) push2_has_fixup = 1;
+                }
+                if( next_op == 0x68 && k + 10 <= code_seg1_len
+                  && !push1_has_fixup && !push2_has_fixup
+                  && k + 10 < code_seg1_len && code_seg1[k+10] == 0xE8 ) {
+                    /* Only convert when followed DIRECTLY by call (E8).
+                     * This is a double constant passed as Watcom register param.
+                     * For cdecl, there may be more pushes before the call. */
+                    /* push $high32; push $low32 → sub $8,%rsp; mov $low,[rsp]; mov $high,4[rsp] */
+                    unsigned char *hi = &code_seg1[k+1];
+                    unsigned char *lo = &code_seg1[k+6];
+                    patched[p++] = 0x48; patched[p++] = 0x83;
+                    patched[p++] = 0xEC; patched[p++] = 0x08; /* sub $8,%rsp */
+                    patched[p++] = 0xC7; patched[p++] = 0x04;
+                    patched[p++] = 0x24;                      /* mov [rsp], */
+                    patched[p++]=lo[0]; patched[p++]=lo[1];
+                    patched[p++]=lo[2]; patched[p++]=lo[3];   /* low32 */
+                    patched[p++] = 0xC7; patched[p++] = 0x44;
+                    patched[p++] = 0x24; patched[p++] = 0x04; /* mov 4[rsp], */
+                    patched[p++]=hi[0]; patched[p++]=hi[1];
+                    patched[p++]=hi[2]; patched[p++]=hi[3];   /* high32 */
+                    k += 10;
+                    continue;
+                } else if( next_op == 0x6A && k + 7 <= code_seg1_len
+                  && !push1_has_fixup
+                  && k + 7 < code_seg1_len && code_seg1[k+7] == 0xE8 ) {
+                    /* push $high32; push $low8 */
+                    unsigned char *hi = &code_seg1[k+1];
+                    unsigned char lo_val = code_seg1[k+6];
+                    patched[p++] = 0x48; patched[p++] = 0x83;
+                    patched[p++] = 0xEC; patched[p++] = 0x08;
+                    patched[p++] = 0xC7; patched[p++] = 0x04;
+                    patched[p++] = 0x24;
+                    patched[p++] = lo_val; patched[p++] = 0;
+                    patched[p++] = 0; patched[p++] = 0;       /* sign-extend lo */
+                    patched[p++] = 0xC7; patched[p++] = 0x44;
+                    patched[p++] = 0x24; patched[p++] = 0x04;
+                    patched[p++]=hi[0]; patched[p++]=hi[1];
+                    patched[p++]=hi[2]; patched[p++]=hi[3];
+                    k += 7;
+                    continue;
                 }
             }
 
@@ -286,6 +706,42 @@ void X64ObjFini( void )
              * Left as-is: the REX effect on the following instruction is usually
              * benign. Programs needing loops should use -od (frame-based) or
              * ensure INC/DEC is avoided via compiler flags. */
+
+            /* A ModR/M byte of mod=00, rm=101 means "absolute disp32" on i386
+             * but "RIP-relative" on x86-64. We WANT RIP-relative on x64
+             * since absolute 32-bit addresses can't reach data above 2GB.
+             * Leave the encoding as-is (rm=101 = RIP-relative on x64).
+             * The relocation uses R_X86_64_PC32 so the linker fills in
+             * the correct RIP-relative displacement. */
+            /* (rm=101 kept as RIP-relative — no conversion needed) */
+
+            /* Accumulator-absolute moves are moffs64 in long mode, so they
+             * read eight bytes of address and swallow the next instruction.
+             * Rewrite to ModR/M with a zero base/index SIB, which keeps
+             * absolute 32-bit semantics:
+             *     A1 disp32  (MOV EAX,[disp32]) -> 8B 04 25 disp32
+             *     A3 disp32  (MOV [disp32],EAX) -> 89 04 25 disp32
+             * A bare byte scan cannot tell an A1 opcode from an A1 that is
+             * really a ModR/M or immediate, so we only rewrite when the OMF
+             * recorded a fixup at exactly k+1 — the displacement slot. That
+             * is only true for a genuine absolute-address operand. */
+            if( (b0 == 0xA1 || b0 == 0xA3) && k + 5 <= code_seg1_len ) {
+                int is_addr = 0;
+                for( int f = 0; f < fixup_count; f++ )
+                    if( fixups[f].code_offset == k + 1 ) { is_addr = 1; break; }
+                if( is_addr ) {
+                    /* A1 → 8B 05 (MOV EAX,[RIP+disp32])
+                     * A3 → 89 05 (MOV [RIP+disp32],EAX)
+                     * RIP-relative: mod=00, reg=000(EAX), rm=101 */
+                    patched[p++] = ( b0 == 0xA1 ) ? 0x8B : 0x89;
+                    patched[p++] = 0x05;    /* ModR/M: mod=00 reg=EAX rm=101 (RIP) */
+                    offset_map[k+1] = p;
+                    for( int d = 0; d < 4; d++ )
+                        patched[p++] = code_seg1[k+1+d];
+                    k += 5;
+                    continue;
+                }
+            }
 
             patched[p++] = code_seg1[k++];
         }
@@ -330,8 +786,8 @@ void X64ObjFini( void )
                 int old_target = old_inst_end + old_disp;
                 if( old_target >= 0 && old_target <= code_seg1_len &&
                     offset_map[k2] >= 0 && offset_map[old_target] >= 0 ) {
-                    /* Instruction length is unchanged by our patches, so the
-                     * new end is simply new_start + inst_len. */
+                    /* Relative jumps themselves are never lengthened, so the
+                     * new end is the mapped start plus the same length. */
                     int new_inst_end = offset_map[k2] + inst_len;
                     int new_target = offset_map[old_target];
                     int32_t new_disp = new_target - new_inst_end;
@@ -350,9 +806,25 @@ void X64ObjFini( void )
                 }
                 k2 += inst_len;
             } else {
-                k2++;
+                /* Skip the WHOLE instruction. Advancing a single byte lets a
+                 * ModRM/SIB/disp byte be read as an opcode next iteration —
+                 * e.g. 8D 7D E0 (lea -0x20(%rbp),%edi) where 0x7D looks like
+                 * a short Jcc, causing the displacement to be rewritten. */
+                int l2 = x86_insn_len( code_seg1, code_seg1_len, k2 );
+                k2 += ( l2 > 0 ? l2 : 1 );
             }
         }
+
+        /* Adjust PUBDEF symbol offsets for REX insertions */
+        for( int q = 0; q < pub_count; q++ ) {
+            if( pub_offs[q] <= (unsigned)code_seg1_len && offset_map[pub_offs[q]] >= 0 )
+                pub_offs[q] = offset_map[pub_offs[q]];
+        }
+
+        /* Save original byte before each fixup (for relocation type selection) */
+        fixup_orig_off = (int *)malloc( fixup_count * sizeof(int) );
+        for( int f = 0; f < fixup_count; f++ )
+            fixup_orig_off[f] = (fixups[f].code_offset >= 1 && fixups[f].code_offset < code_seg1_len) ? code_seg1[fixups[f].code_offset - 1] : 0;
 
         /* Adjust fixup offsets */
         for( int f = 0; f < fixup_count; f++ ) {
@@ -365,39 +837,14 @@ void X64ObjFini( void )
         code_seg1_len = p;
         free( patched );
         free( offset_map );
+        
     }
 
-    /* ============================================================
-     * Patch data segment references
-     * If data_seg2 has string literals, append them to code and
-     * patch any MOV EAX,0 that references the data segment.
-     * ============================================================ */
+    /* Data now goes into its own .data section, so the displacement left in
+     * the code stays a pure offset within its segment; the relocation addend
+     * carries the segment base. Nothing to patch into the code here. */
     int combined_len = code_seg1_len;
-    if( data_seg2_len > 0 ) {
-        /* Find ALL MOV EAX,imm32 (B8 00 00 00 00) followed by CALL (E8).
-         * Each references a string in the data segment, in order.
-         * Patch each with the correct offset into the appended data. */
-        {
-            int str_offset = 0;  /* current position within data segment */
-            for( int k = 0; k < code_seg1_len - 5; k++ ) {
-                if( code_seg1[k] == 0xB8 &&
-                    code_seg1[k+1] == 0x00 && code_seg1[k+2] == 0x00 &&
-                    code_seg1[k+3] == 0x00 && code_seg1[k+4] == 0x00 &&
-                    code_seg1[k+5] == 0xE8 ) {
-                    /* Patch with data_base + current string offset */
-                    uint32_t addr = (uint32_t)(code_seg1_len + str_offset);
-                    memcpy( code_seg1 + k + 1, &addr, 4 );
-                    /* Advance to next string (find null terminator) */
-                    while( str_offset < data_seg2_len && data_seg2[str_offset] != 0 )
-                        str_offset++;
-                    if( str_offset < data_seg2_len ) str_offset++; /* skip null */
-                }
-            }
-        }
-        /* Append data segment to code */
-        memcpy( code_seg1 + code_seg1_len, data_seg2, data_seg2_len );
-        combined_len = code_seg1_len + data_seg2_len;
-    }
+    (void)combined_len;
 
     /* ============================================================
      * Write ELF64 with .rela.text
@@ -408,52 +855,90 @@ void X64ObjFini( void )
     if( !fp_out ) { free(omf); free(code_seg1); free(data_seg2); free(temp_name); return; }
 
     /* Build string table */
-    char strtab[2048];
+    static char strtab[262144];   /* symbol-heavy modules need far more than 2K */
     int st_len = 0;
     strtab[st_len++] = 0;
     int str_text = st_len;     memcpy(strtab+st_len, ".text", 6);       st_len += 6;
     int str_strtab = st_len;   memcpy(strtab+st_len, ".strtab", 8);     st_len += 8;
     int str_symtab = st_len;   memcpy(strtab+st_len, ".symtab", 8);     st_len += 8;
+    int str_data = st_len;     memcpy(strtab+st_len, ".data", 6);        st_len += 6;
+    int str_bss = st_len;      memcpy(strtab+st_len, ".bss", 5);         st_len += 5;
     int str_relatext = st_len; memcpy(strtab+st_len, ".rela.text", 11); st_len += 11;
-    int str_main = st_len;     memcpy(strtab+st_len, "main", 5);        st_len += 5;
+    int str_reladata = st_len; memcpy(strtab+st_len, ".rela.data", 11); st_len += 11;
+    int str_note = st_len;     memcpy(strtab+st_len, ".note.GNU-stack", 16); st_len += 16;
+    int str_pub[512];
+    for( int q = 0; q < pub_count; q++ ) {
+        str_pub[q] = st_len;
+        int pl = strlen(pub_names[q]) + 1;
+        memcpy(strtab+st_len, pub_names[q], pl);
+        st_len += pl;
+    }
 
-    int str_ext[64];
+    /* An EXTDEF that also appears as a PUBDEF is defined in this module
+     * (Watcom lists intra-module calls as externals). Point such a fixup at
+     * the local definition rather than emitting a duplicate undefined symbol. */
+    int str_ext[512];
+    int ext_local[512];           /* index into pub_*, or -1 if truly external */
     for( int e = 0; e < ext_count; e++ ) {
-        str_ext[e] = st_len;
-        int el = strlen(ext_names[e]) + 1;
-        memcpy(strtab+st_len, ext_names[e], el);
-        st_len += el;
+        ext_local[e] = -1;
+        for( int q = 0; q < pub_count; q++ ) {
+            if( strcmp(ext_names[e], pub_names[q]) == 0 ) { ext_local[e] = q; break; }
+        }
+        if( ext_local[e] >= 0 ) {
+            str_ext[e] = str_pub[ext_local[e]];
+        } else {
+            str_ext[e] = st_len;
+            int el = strlen(ext_names[e]) + 1;
+            memcpy(strtab+st_len, ext_names[e], el);
+            st_len += el;
+        }
     }
 
     /* Layout with optional .rela.text */
-    int num_syms = 3 + ext_count;  /* null + .text + main + externals */
-    int num_local = 2;             /* null + .text section */
-    int has_rela = (fixup_count > 0 || data_seg2_len > 0);
-    /* Count string references: B8+E8 patterns with patched data offset.
-     * Must count AFTER data segment is appended to code_seg1. */
-    int str_ref_count = 0;
-    int orig_code_len = code_seg1_len; /* code length before data append */
-    if( data_seg2_len > 0 ) {
-        for( int k = 0; k < orig_code_len - 5; k++ ) {
-            if( code_seg1[k] == 0xB8 && code_seg1[k+5] == 0xE8 ) {
-                uint32_t imm; memcpy(&imm, code_seg1+k+1, 4);
-                if( imm >= (uint32_t)orig_code_len ) str_ref_count++;
-            }
-        }
+    int real_ext = 0;
+    for( int e = 0; e < ext_count; e++ ) if( ext_local[e] < 0 ) real_ext++;
+
+    /* ELF requires every STB_LOCAL symbol to appear before the first global,
+     * with sh_info equal to the number of leading locals. Emit static symbols
+     * first and record where each pubdef ends up so relocations can find it. */
+    int pub_symidx[512];
+    int n_local_pub = 0;
+    for( int q = 0; q < pub_count; q++ ) if( pub_local[q] ) n_local_pub++;
+    {
+        int nxt = 4;
+        for( int q = 0; q < pub_count; q++ ) if( pub_local[q] )  pub_symidx[q] = nxt++;
+        for( int q = 0; q < pub_count; q++ ) if( !pub_local[q] ) pub_symidx[q] = nxt++;
     }
-    int num_relas = fixup_count + str_ref_count;
+    int num_syms = 4 + pub_count + real_ext;  /* null + 3 sections + defined + undefined */
+    int num_local = 4 + n_local_pub;          /* null + 3 sections + statics */
+    int has_rela = (fixup_count > 0);
+    int num_relas = fixup_count;
     int num_relas_written = 0;
 
     size_t text_off = sizeof(Elf64_Ehdr);
-    size_t text_pad = (16 - (text_off + combined_len) % 16) % 16;
-    size_t symtab_off = text_off + combined_len + text_pad;
+    size_t text_pad  = (16 - (text_off + combined_len) % 16) % 16;
+    size_t data_off  = text_off + combined_len + text_pad;
+    size_t data_pad  = (16 - (data_off + data_seg2_len) % 16) % 16;
+    size_t symtab_off = data_off + data_seg2_len + data_pad;
     size_t symtab_sz = num_syms * sizeof(Elf64_Sym);
     size_t rela_off = symtab_off + symtab_sz;
     size_t rela_sz = num_relas * sizeof(Elf64_Rela);
-    size_t strtab_off = rela_off + rela_sz;
+    size_t drela_off = rela_off + rela_sz;
+    size_t drela_sz = dfixup_count * sizeof(Elf64_Rela);
+    size_t strtab_off = drela_off + drela_sz;
     size_t strtab_pad = (8 - (strtab_off + st_len) % 8) % 8;
     size_t shdr_off = strtab_off + st_len + strtab_pad;
-    int num_shdrs = has_rela ? 5 : 4;  /* null + .text + .symtab + .strtab [+ .rela.text] */
+    /* 0 null, 1 .text, 2 .data, 3 .bss, 4 .symtab, [5 .rela.text,] .strtab */
+    int has_drela = ( dfixup_count > 0 );
+    int SEC_TEXT = 1, SEC_DATA = 2, SEC_BSS = 3, SEC_SYMTAB = 4;
+    int nsec = 5;
+    int SEC_RELA  = has_rela  ? nsec++ : 0;
+    int SEC_RELAD = has_drela ? nsec++ : 0;
+    int SEC_NOTE = nsec++;      /* .note.GNU-stack */
+    int SEC_STRTAB = nsec++;
+    int num_shdrs = nsec;
+    (void)SEC_NOTE;
+    (void)SEC_RELA; (void)SEC_RELAD;
 
     /* ELF header */
     Elf64_Ehdr ehdr;
@@ -473,12 +958,16 @@ void X64ObjFini( void )
     ehdr.e_ehsize = sizeof(Elf64_Ehdr);
     ehdr.e_shentsize = sizeof(Elf64_Shdr);
     ehdr.e_shnum = num_shdrs;
-    ehdr.e_shstrndx = has_rela ? 4 : 3;  /* .strtab index */
+    ehdr.e_shstrndx = SEC_STRTAB;
     fwrite(&ehdr, 1, sizeof(ehdr), fp_out);
 
-    /* .text content (code + appended data) */
+    /* .text contents */
     fwrite(code_seg1, 1, combined_len, fp_out);
     { char pad[16] = {0}; fwrite(pad, 1, text_pad, fp_out); }
+    /* .data contents */
+    if( data_seg2_len > 0 )
+        fwrite(data_seg2, 1, data_seg2_len, fp_out);
+    { char pad[16] = {0}; fwrite(pad, 1, data_pad, fp_out); }
 
     /* Symbol table */
     Elf64_Sym sym;
@@ -487,21 +976,77 @@ void X64ObjFini( void )
     memset(&sym, 0, sizeof(sym));  /* [1] .text section */
     sym.st_name = str_text;
     sym.st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION);
-    sym.st_shndx = 1;
+    sym.st_shndx = SEC_TEXT;
     fwrite(&sym, 1, sizeof(sym), fp_out);
 
-    memset(&sym, 0, sizeof(sym));  /* [2] main */
-    sym.st_name = str_main;
-    sym.st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
-    sym.st_shndx = 1;
-    sym.st_value = 0;
-    sym.st_size = code_seg1_len;
+    memset(&sym, 0, sizeof(sym));  /* [2] .data section — relocation anchor */
+    sym.st_name = str_data;
+    sym.st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION);
+    sym.st_shndx = SEC_DATA;
     fwrite(&sym, 1, sizeof(sym), fp_out);
 
-    for( int e = 0; e < ext_count; e++ ) {  /* [3+] externals */
+    memset(&sym, 0, sizeof(sym));  /* [3] .bss section */
+    sym.st_name = str_bss;
+    sym.st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION);
+    sym.st_shndx = SEC_BSS;
+    fwrite(&sym, 1, sizeof(sym), fp_out);
+
+    /* [2 ..] every symbol this module defines.
+     * PUBDEF records the defining segment, so a symbol from a data segment
+     * is a variable, not a function: it lives in the data block appended to
+     * .text and must be typed STT_OBJECT. Emitting everything as STT_FUNC at
+     * a code offset made a global resolve to the middle of the code. */
+    for( int pass_local = 1; pass_local >= 0; pass_local-- )
+    for( int q = 0; q < pub_count; q++ ) {
+        if( pub_local[q] != pass_local ) continue;
+        int is_code = ( pub_segs[q] == text_seg_idx );
         memset(&sym, 0, sizeof(sym));
-        sym.st_name = str_ext[e];
-        sym.st_info = ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE);
+        sym.st_name  = str_pub[q];
+        sym.st_shndx = is_code ? SEC_TEXT : SEC_DATA;
+        if( is_code ) {
+            unsigned int next = (unsigned int)code_seg1_len;
+            for( int r = 0; r < pub_count; r++ )
+                if( pub_segs[r] == text_seg_idx &&
+                    pub_offs[r] > pub_offs[q] && pub_offs[r] < next )
+                    next = pub_offs[r];
+            sym.st_info  = ELF64_ST_INFO(
+                pub_local[q] ? STB_LOCAL : STB_GLOBAL, STT_FUNC);
+            sym.st_value = pub_offs[q];
+            sym.st_size  = next - pub_offs[q];
+        } else {
+            int ps = pub_segs[q];
+            int in_bss = ( ps > 0 && ps < 512 && seg_is_bss[ps] );
+            int base;
+            if( in_bss ) {
+                sym.st_shndx = SEC_BSS;
+                base = ( seg_bss_base[ps] >= 0 ) ? seg_bss_base[ps] : 0;
+            } else {
+                base = ( ps > 0 && ps < 512 && seg_base[ps] >= 0 ) ? seg_base[ps] : 0;
+            }
+            /* Size is the gap to the next symbol defined in the same
+             * segment, falling back to the rest of the segment. Reporting a
+             * flat 4 bytes for every object made a 36-byte array claim to be
+             * an int, which is wrong for any tool that reads sizes. */
+            unsigned int endoff = seg_len[ps];
+            for( int r = 0; r < pub_count; r++ ) {
+                if( r == q || pub_segs[r] != ps ) continue;
+                if( pub_offs[r] > pub_offs[q] && pub_offs[r] < endoff )
+                    endoff = pub_offs[r];
+            }
+            sym.st_info  = ELF64_ST_INFO(
+                pub_local[q] ? STB_LOCAL : STB_GLOBAL, STT_OBJECT);
+            sym.st_value = (unsigned int)base + pub_offs[q];
+            sym.st_size  = ( endoff > pub_offs[q] ) ? endoff - pub_offs[q] : 4;
+        }
+        fwrite(&sym, 1, sizeof(sym), fp_out);
+    }
+
+    /* [..] names referenced but not defined here */
+    for( int e = 0; e < ext_count; e++ ) {
+        if( ext_local[e] >= 0 ) continue;          /* defined above */
+        memset(&sym, 0, sizeof(sym));
+        sym.st_name  = str_ext[e];
+        sym.st_info  = ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE);
         sym.st_shndx = SHN_UNDEF;
         fwrite(&sym, 1, sizeof(sym), fp_out);
     }
@@ -510,34 +1055,157 @@ void X64ObjFini( void )
     if( has_rela ) {
         Elf64_Rela rela;
 
-        /* String address relocations: R_X86_64_32 for each MOV EAX+CALL */
-        if( data_seg2_len > 0 ) {
-            int str_off2 = 0;
-            for( int k = 0; k < code_seg1_len - 5; k++ ) {
-                if( code_seg1[k] == 0xB8 && code_seg1[k+5] == 0xE8 ) {
-                    /* Check if this was patched (non-zero imm32) */
-                    uint32_t imm;
-                    memcpy(&imm, code_seg1 + k + 1, 4);
-                    if( imm >= (uint32_t)orig_code_len ) {
-                        memset(&rela, 0, sizeof(rela));
-                        rela.r_offset = k + 1;
-                        rela.r_info = ELF64_R_INFO(1, R_X86_64_32);
-                        rela.r_addend = imm;  /* actual offset into combined .text */
-                        fwrite(&rela, 1, sizeof(rela), fp_out);
-                        num_relas_written++;
+        /* Emit one ELF64 relocation per recorded OMF fixup. */
+        for( int f = 0; f < fixup_count; f++ ) {
+            int off = fixups[f].code_offset;
+            memset(&rela, 0, sizeof(rela));
+            rela.r_offset = off;
+
+            if( fixups[f].ext_idx >= 0 ) {
+                /* External symbol. A displacement that directly follows an
+                 * E8/E9 opcode is PC-relative; anything else is absolute. */
+                int e = fixups[f].ext_idx;
+                int sym_idx;
+                if( ext_local[e] >= 0 ) {
+                    sym_idx = pub_symidx[ext_local[e]];  /* defined in module */
+                } else {
+                    int rank = 0;                        /* nth undefined name */
+                    for( int t = 0; t < e; t++ ) if( ext_local[t] < 0 ) rank++;
+                    sym_idx = 4 + pub_count + rank;
+                }
+                int pcrel = ( off >= 1 &&
+                              (code_seg1[off-1] == 0xE8 || code_seg1[off-1] == 0xE9) );
+                /* The displacement already encoded at the fixup site is part
+                 * of the address: a struct field offset, or the bias in a
+                 * form like -4(%rax) used to index an array. A relocation
+                 * overwrites that slot with S+A, so the existing value has to
+                 * be carried into the addend or it is silently lost. Dropping
+                 * it made g.y read g.x, and shifted array indexing by one. */
+                int32_t within = 0;
+                if( off + 4 <= code_seg1_len )
+                    memcpy( &within, code_seg1 + off, 4 );
+                if( pcrel ) {
+                    rela.r_info = ELF64_R_INFO(sym_idx, R_X86_64_PLT32);
+                    rela.r_addend = (int64_t)within - 4;
+                } else {
+                    /* Use PC32 only for pure RIP-relative (mod=00,rm=101).
+                     * Check the byte before the fixup in PATCHED code
+                     * (code_seg1 was overwritten with patched data). */
+                    unsigned char prev = (off >= 1) ? code_seg1[off-1] : 0;
+                    if( (prev & 0xC7) == 0x05 ) {
+                        rela.r_info = ELF64_R_INFO(sym_idx, R_X86_64_PC32);
+                        /* Check if instruction has trailing immediate after disp32.
+                         * The opcode byte is 2 before the fixup (or 3 if REX prefix).
+                         * 83/C6 = trailing imm8 (-5), 81/C7 = trailing imm32 (-8) */
+                        int trail = 0;
+                        if( off >= 2 ) {
+                            unsigned char op = code_seg1[off-2];
+                            if( op == 0x48 && off >= 3 ) op = code_seg1[off-3];
+                            if( op == 0x83 || op == 0xC6 || op == 0x80 || op == 0x6B ) trail = 1;
+                            else if( op == 0x81 || op == 0xC7 || op == 0x69 ) trail = 4;
+                            else {
+                                /* opcode may be one more byte back (ModRM between) */
+                                unsigned char op2 = (off >= 3) ? code_seg1[off-3] : 0;
+                                if( op2 == 0x48 && off >= 4 ) op2 = code_seg1[off-4];
+                                if( op2 == 0x83 || op2 == 0xC6 || op2 == 0x80 || op2 == 0x6B ) trail = 1;
+                                else if( op2 == 0x81 || op2 == 0xC7 || op2 == 0x69 ) trail = 4;
+                            }
+                        }
+                        rela.r_addend = (int64_t)within - 4 - trail;
+                    } else {
+                        rela.r_info = ELF64_R_INFO(sym_idx, R_X86_64_32S);
+                        rela.r_addend = within;
+                    }
+                }
+            } else {
+                /* Data reference: resolve against the .data section symbol.
+                 * The code holds the offset within the target segment; the
+                 * addend adds that segment's base inside .data. */
+                uint32_t within = 0;
+                if( off + 4 <= code_seg1_len )
+                    memcpy( &within, code_seg1 + off, 4 );
+                int ts = fixups[f].target_seg;
+                int anchor, base;
+                if( ts > 0 && ts < 512 && seg_is_bss[ts] ) {
+                    anchor = SEC_BSS;
+                    base = ( seg_bss_base[ts] >= 0 ) ? seg_bss_base[ts] : 0;
+                } else if( ts == text_seg_idx ) {
+                    /* Data placed in code segment (e.g. local array initializers).
+                     * Reference against .text, not .data. */
+                    anchor = SEC_TEXT;
+                    base = 0;
+                } else {
+                    anchor = SEC_DATA;
+                    base = ( ts > 0 && ts < 512 && seg_base[ts] >= 0 ) ? seg_base[ts] : 0;
+                }
+                {
+                    unsigned char prev = (off >= 1) ? fixup_orig_off[f] : 0;
+                    if( (prev >= 0xB8 && prev <= 0xBF) || prev == 0x68
+                      || prev == 0x6A || prev == 0xC7 ) {
+                        rela.r_info = ELF64_R_INFO(anchor, R_X86_64_32S);
+                        rela.r_addend = (int64_t)base + within;
+                    } else {
+                        rela.r_info = ELF64_R_INFO(anchor, R_X86_64_PC32);
+                        {
+                            int trail = 0;
+                            if( off >= 2 ) {
+                                unsigned char op = code_seg1[off-2];
+                                if( op == 0x48 && off >= 3 ) op = code_seg1[off-3];
+                                if( op == 0x83 || op == 0xC6 || op == 0x80 || op == 0x6B ) trail = 1;
+                                else if( op == 0x81 || op == 0xC7 || op == 0x69 ) trail = 4;
+                            }
+                            rela.r_addend = (int64_t)base + within - 4 - trail;
+                        }
                     }
                 }
             }
-        }
-
-        /* External call relocations: R_X86_64_PLT32 */
-        for( int f = 0; f < fixup_count; f++ ) {
-            int sym_idx = 3 + fixups[f].ext_idx;  /* after null, .text, main */
-            memset(&rela, 0, sizeof(rela));
-            rela.r_offset = fixups[f].code_offset;
-            rela.r_info = ELF64_R_INFO(sym_idx, R_X86_64_PLT32);
-            rela.r_addend = -4;  /* standard for CALL near: RIP+4 adjustment */
             fwrite(&rela, 1, sizeof(rela), fp_out);
+            num_relas_written++;
+        }
+    }
+
+    /* .rela.data — relocations applied to the data image itself.
+     * A pointer initialiser holds the target's offset within its segment;
+     * the addend carries that plus the segment's base, and the entry is
+     * anchored on the section (or symbol) being pointed at. Pointers are
+     * four bytes here because the code generator is the 32-bit one, so the
+     * type is R_X86_64_32 rather than the R_X86_64_64 a 64-bit compiler
+     * would emit. */
+    if( has_drela ) {
+        Elf64_Rela drela;
+        for( int f = 0; f < dfixup_count; f++ ) {
+            int off = dfixups[f].code_offset;
+            uint32_t within = 0;
+            if( off >= 0 && off + 4 <= data_seg2_len )
+                memcpy( &within, data_seg2 + off, 4 );
+            memset(&drela, 0, sizeof(drela));
+            drela.r_offset = off;
+            if( dfixups[f].ext_idx >= 0 ) {
+                int e = dfixups[f].ext_idx;
+                int sidx2;
+                if( ext_local[e] >= 0 ) {
+                    sidx2 = pub_symidx[ext_local[e]];
+                } else {
+                    int rank = 0;
+                    for( int t = 0; t < e; t++ ) if( ext_local[t] < 0 ) rank++;
+                    sidx2 = 4 + pub_count + rank;
+                }
+                drela.r_info = ELF64_R_INFO(sidx2, R_X86_64_32);
+                drela.r_addend = within;
+            } else {
+                int ts = dfixups[f].target_seg;
+                int anchor, base;
+                if( ts > 0 && ts < 512 && seg_is_bss[ts] ) {
+                    anchor = SEC_BSS;
+                    base = ( seg_bss_base[ts] >= 0 ) ? seg_bss_base[ts] : 0;
+                } else {
+                    anchor = SEC_DATA;
+                    base = ( ts > 0 && ts < 512 && seg_base[ts] >= 0 ) ? seg_base[ts] : 0;
+                }
+                drela.r_info = ELF64_R_INFO(anchor, R_X86_64_32S);
+                drela.r_addend = (int64_t)base + within;
+            }
+            fwrite(&drela, 1, sizeof(drela), fp_out);
         }
     }
 
@@ -558,12 +1226,31 @@ void X64ObjFini( void )
     shdr.sh_addralign = 16;
     fwrite(&shdr, 1, sizeof(shdr), fp_out);
 
-    memset(&shdr, 0, sizeof(shdr));  /* [2] .symtab */
+    memset(&shdr, 0, sizeof(shdr));  /* [2] .data */
+    shdr.sh_name = str_data;
+    shdr.sh_type = SHT_PROGBITS;
+    shdr.sh_flags = SHF_ALLOC | SHF_WRITE;
+    shdr.sh_offset = data_off;
+    shdr.sh_size = data_seg2_len;
+    shdr.sh_addralign = 16;
+    fwrite(&shdr, 1, sizeof(shdr), fp_out);
+
+    memset(&shdr, 0, sizeof(shdr));  /* [3] .bss */
+    shdr.sh_name = str_bss;
+    shdr.sh_type = SHT_NOBITS;
+    shdr.sh_flags = SHF_ALLOC | SHF_WRITE;
+    shdr.sh_offset = symtab_off;   /* NOBITS occupies no file space */
+    
+    shdr.sh_size = bss_total;
+    shdr.sh_addralign = 16;
+    fwrite(&shdr, 1, sizeof(shdr), fp_out);
+
+    memset(&shdr, 0, sizeof(shdr));  /* [4] .symtab */
     shdr.sh_name = str_symtab;
     shdr.sh_type = SHT_SYMTAB;
     shdr.sh_offset = symtab_off;
     shdr.sh_size = symtab_sz;
-    shdr.sh_link = has_rela ? 4 : 3;  /* .strtab index */
+    shdr.sh_link = SEC_STRTAB;
     shdr.sh_info = num_local;
     shdr.sh_addralign = 8;
     shdr.sh_entsize = sizeof(Elf64_Sym);
@@ -576,14 +1263,39 @@ void X64ObjFini( void )
         shdr.sh_flags = SHF_INFO_LINK;
         shdr.sh_offset = rela_off;
         shdr.sh_size = rela_sz;
-        shdr.sh_link = 2;  /* .symtab index */
-        shdr.sh_info = 1;  /* .text index */
+        shdr.sh_link = SEC_SYMTAB;
+        shdr.sh_info = SEC_TEXT;
         shdr.sh_addralign = 8;
         shdr.sh_entsize = sizeof(Elf64_Rela);
         fwrite(&shdr, 1, sizeof(shdr), fp_out);
     }
 
-    memset(&shdr, 0, sizeof(shdr));  /* [3 or 4] .strtab */
+    if( has_drela ) {
+        memset(&shdr, 0, sizeof(shdr));  /* .rela.data */
+        shdr.sh_name = str_reladata;
+        shdr.sh_type = SHT_RELA;
+        shdr.sh_flags = SHF_INFO_LINK;
+        shdr.sh_offset = drela_off;
+        shdr.sh_size = drela_sz;
+        shdr.sh_link = SEC_SYMTAB;
+        shdr.sh_info = SEC_DATA;
+        shdr.sh_addralign = 8;
+        shdr.sh_entsize = sizeof(Elf64_Rela);
+        fwrite(&shdr, 1, sizeof(shdr), fp_out);
+    }
+
+    /* An empty .note.GNU-stack tells the linker the stack need not be
+     * executable. Without it every link warns and marks the stack RWX. */
+    memset(&shdr, 0, sizeof(shdr));
+    shdr.sh_name = str_note;
+    shdr.sh_type = SHT_PROGBITS;
+    shdr.sh_flags = 0;
+    shdr.sh_offset = strtab_off;
+    shdr.sh_size = 0;
+    shdr.sh_addralign = 1;
+    fwrite(&shdr, 1, sizeof(shdr), fp_out);
+
+    memset(&shdr, 0, sizeof(shdr));  /* .strtab */
     shdr.sh_name = str_strtab;
     shdr.sh_type = SHT_STRTAB;
     shdr.sh_offset = strtab_off;
@@ -591,6 +1303,7 @@ void X64ObjFini( void )
     shdr.sh_addralign = 1;
     fwrite(&shdr, 1, sizeof(shdr), fp_out);
 
+    if( fixup_orig_off ) free( fixup_orig_off );
     fclose(fp_out);
 
     /* Replace OMF with ELF64 (only if we have code) */

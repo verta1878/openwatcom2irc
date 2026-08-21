@@ -37,6 +37,7 @@
 #include "freelist.h"
 #include "data.h"
 #include "makeins.h"
+#include "targsys.h"
 #include "namelist.h"
 #include "optab.h"
 
@@ -152,8 +153,27 @@ instruction     *MakeNary( opcode_defs opcode, name *left,
 
     ins = NewIns( num_operands );
     ins->head.opcode = opcode;
+#if _TARGET & _TARG_X64
+    /* On x64, remap 8-byte types to 4-byte for register allocation.
+     * EXCEPTION: OP_CONVERT instructions that widen from 4-byte to
+     * 8-byte (e.g. CDQ for IDIV) must keep their U8/I8 type_class
+     * so the register allocator assigns the EDX:EAX pair. */
+    if( type_class == CP || type_class == PT ) {
+        /* Pointers: remap to U4 (single GPR with REX.W) */
+        ins->base_type_class = type_class;
+        ins->type_class = U4;
+    } else {
+        /* U8/I8 (long long): keep type_class for 64-bit semantics.
+         * ClassSets[U8/I8]=RL_DOUBLE on x64 (single GPR, not pair).
+         * The optab remap in CodeTable still uses U4/I4 tables
+         * for instruction patterns. */
+        ins->type_class = type_class;
+        ins->base_type_class = base_type_class;
+    }
+#else
     ins->type_class = type_class;
     ins->base_type_class = base_type_class;
+#endif
     ins->operands[0] = left;
     ins->operands[1] = right;
     ins->result = result;

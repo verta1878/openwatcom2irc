@@ -32,6 +32,7 @@
 
 #include "_cgstd.h"
 #include "coderep.h"
+#include "targsys.h"
 #include "system.h"
 #include "zoiks.h"
 #include "makeins.h"
@@ -935,7 +936,7 @@ void    CnvOpToInt( instruction * ins, opcnt op )
             ins->operands[op] = IntEquivalent( name1 );
         }
         break;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     /*
      * this is for the I8 stuff - can't tell what to do in
      * HighPart and LowPart if we don't get rid on constant

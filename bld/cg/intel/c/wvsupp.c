@@ -63,7 +63,7 @@ static  uint    MultiReg( register_name *reg )
 #endif
 #if _TARGET & _TARG_8086
     hw_reg = Low32Reg( hw_reg );
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
     hw_reg = Low64Reg( hw_reg );
 #endif
     if( HW_CEqual( hw_reg, HW_EMPTY ) ) {

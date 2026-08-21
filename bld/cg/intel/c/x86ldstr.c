@@ -147,7 +147,7 @@ static const hw_reg_set *FindRegister( instruction *ins )
         start = RegSets[RL_WORD];
         rover_ptr = &RoverWord;
         break;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     case U4:
     case I4:
         start = RegSets[RL_DOUBLE];

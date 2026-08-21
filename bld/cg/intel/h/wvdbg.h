@@ -161,7 +161,7 @@
         #define CODE_BLOCK      CODE_BLOCK_286
         #define CODE_NEAR_RTN   CODE_NEAR_RTN_286
         #define CODE_FAR_RTN    CODE_FAR_RTN_286
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
         #define FORTRAN_TYPE    FORTRAN_TYPE_386
         #define POINTER_NEAR    POINTER_NEAR_386
         #define POINTER_FAR     POINTER_FAR_386

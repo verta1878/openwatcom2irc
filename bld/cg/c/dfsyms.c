@@ -252,7 +252,7 @@ static void CLIReloc( dw_sectnum sect, dw_reloc_type reloc_type, ... )
             DoLblReloc( ARange, 0 );
     #if (_TARGET & _TARG_8086)
             DoSegLblReloc( ARange );
-    #elif (_TARGET & _TARG_80386)
+    #elif (_TARGET & (_TARG_80386 | _TARG_X64))
             if( _IsntTargetModel( CGSW_X86_FLAT_MODEL ) ) {
                 DoSegLblReloc( ARange );
             }
@@ -400,7 +400,7 @@ static int InitCU( dw_cu_info *cu )
     cu->offset_size = tipe_addr->length;
 #if (_TARGET & _TARG_8086)
     cu->segment_size = 2;
-#elif (_TARGET & _TARG_80386)
+#elif (_TARGET & (_TARG_80386 | _TARG_X64))
     cu->segment_size = ( _IsntTargetModel( CGSW_X86_FLAT_MODEL ) ) ? 2 : 0;
 #else
     cu->segment_size = 0;
@@ -498,7 +498,7 @@ void    DFBegCCU( segment_id code_segid, dw_sym_handle dbg_pch )
         Pc_High = NULL;
         bck = NULL;
 #else
-    #if (_TARGET & _TARG_80386)
+    #if (_TARGET & (_TARG_80386 | _TARG_X64))
         if( _IsTargetModel( CGSW_X86_FLAT_MODEL ) ) {
     #endif
             // Emitting DW_AT_low_pc and DW_AT_high_pc is valid *only* if the
@@ -515,7 +515,7 @@ void    DFBegCCU( segment_id code_segid, dw_sym_handle dbg_pch )
                 Pc_Low = bck;
                 Pc_High = MakeLabel();
             POP_OP();
-    #if (_TARGET & _TARG_80386)
+    #if (_TARGET & (_TARG_80386 | _TARG_X64))
         } else {
             Pc_Low = NULL;
             Pc_High = NULL;
@@ -650,7 +650,7 @@ void    DFObjLineInitDbgInfo( void )
         cu.dbg_pch = NULL;
 #if defined( DWARF_CU_REC_NO_PCLO_PCHI ) || (_TARGET & _TARG_8086)
         cu.flags = DW_CU_FLAG_NONE;
-#elif (_TARGET & _TARG_80386)
+#elif (_TARGET & (_TARG_80386 | _TARG_X64))
         cu.flags = _IsntTargetModel( CGSW_X86_FLAT_MODEL ) ? DW_CU_FLAG_NONE : DW_CU_FLAG_CONTIGUOUS;
 #else
         cu.flags = DW_CU_FLAG_CONTIGUOUS;
@@ -738,7 +738,7 @@ void     DFLineNum( cue_state *state, offset lc )
         DWLineAddr( Client, (dw_sym_handle)bck, lc );
 #if (_TARGET & _TARG_8086)
         DWLineSeg( Client, (dw_sym_handle)bck );
-#elif (_TARGET & _TARG_80386)
+#elif (_TARGET & (_TARG_80386 | _TARG_X64))
         if( _IsntTargetModel( CGSW_X86_FLAT_MODEL ) ) {
             DWLineSeg( Client, (dw_sym_handle)bck );
         }
@@ -791,7 +791,7 @@ void    DFGenStatic( cg_sym_handle sym, dbg_loc loc )
     if( attr & FE_STATIC ) {
         dw_segloc = SegLoc( sym );
     }
-#elif (_TARGET & _TARG_80386)
+#elif (_TARGET & (_TARG_80386 | _TARG_X64))
     if( attr & FE_STATIC ) {
         if( _IsntTargetModel( CGSW_X86_FLAT_MODEL ) ) {
             dw_segloc = SegLoc( sym );
@@ -1009,7 +1009,7 @@ void    DFProEnd( dbg_rtn *rtn, offset lc )
     if( (call_class_target)(pointer_uint)FindAuxInfoSym( sym, FEINF_CALL_CLASS_TARGET ) & FECALL_X86_FAR_CALL ) {
   #if _TARGET & _TARG_8086
         flags = DW_FLAG_PTR_TYPE_FAR16;
-  #elif _TARGET & _TARG_80386
+  #elif _TARGET & (_TARG_80386 | _TARG_X64)
         flags = DW_FLAG_PTR_TYPE_FAR32;
   #endif
     }
@@ -1040,7 +1040,7 @@ void    DFProEnd( dbg_rtn *rtn, offset lc )
     dw_retloc = RetLoc( rtn->ret_offset );
     dw_frameloc = FrameLoc();
     dw_segloc = SegLoc( sym );
-#elif (_TARGET & _TARG_80386)
+#elif (_TARGET & (_TARG_80386 | _TARG_X64))
     dw_retloc = RetLoc( rtn->ret_offset );
     dw_frameloc = FrameLoc();
     dw_segloc = ( _IsntTargetModel( CGSW_X86_FLAT_MODEL ) ) ? SegLoc( sym ) : NULL;

@@ -77,7 +77,7 @@
 #if _TARGET & _TARG_8086
     #define LONG_JUMP 5
     #define SHORT_JUMP 2
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
     #define LONG_JUMP 6
     #define SHORT_JUMP 2
 #endif

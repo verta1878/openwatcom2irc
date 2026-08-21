@@ -30,6 +30,6 @@
 ****************************************************************************/
 
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 extern void     ExpandThreadDataRef( instruction *ins );
 #endif

@@ -62,7 +62,7 @@ type_length      ParmMem( type_length length, type_length alignment, call_state 
     type_length     word_size;
 
     word_size = REG_SIZE;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _RoutineIsFar16( state->attr ) ) {
         // use 16-bit word size for rounding
         word_size >>= 1;

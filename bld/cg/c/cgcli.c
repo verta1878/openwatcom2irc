@@ -83,7 +83,7 @@ bool _CGAPI BELoad( cchar_ptr dll_name )
     if( dll_name == NULL ) {
 #if _TARGET & _TARG_8086
         dll_name = "cgi86.dll";
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
         dll_name = "cg386.dll";
 #elif _TARGET & _TARG_AXP
         dll_name = "cgaxp.dll";
@@ -91,6 +91,9 @@ bool _CGAPI BELoad( cchar_ptr dll_name )
         dll_name = "cgppc.dll";
 #elif _TARGET & _TARG_MIPS
         dll_name = "cgmps.dll";
+#elif _TARGET & _TARG_X64
+    /* x86-64: same target class as 386 (Intel) */
+    #include "cg386wrg.h"
 #else
 #error Unknown target.
 #endif

@@ -38,12 +38,22 @@
 /*                      refno           length  attributes */
 /*                      ======          ======  ========== */
 
+#if _TARGET & _TARG_X64
+/* x64: all pointers are 8 bytes, flat model, no segments */
+//const type_def THugeCP = { TY_HUGE_CODE_PTR, 8,      TYPE_POINTER + TYPE_CODE };
+const type_def TLongCP = { TY_LONG_CODE_PTR,  8,      TYPE_POINTER + TYPE_CODE };
+const type_def TNearCP = { TY_NEAR_CODE_PTR,  8,      TYPE_POINTER + TYPE_CODE };
+const type_def THugeP  = { TY_HUGE_POINTER,   8,      TYPE_POINTER };
+const type_def TLongP  = { TY_LONG_POINTER,   8,      TYPE_POINTER };
+const type_def TNearP  = { TY_NEAR_POINTER,   8,      TYPE_POINTER };
+#else
 //const type_def THugeCP = { TY_HUGE_CODE_PTR, 6,      TYPE_POINTER + TYPE_CODE };
 const type_def TLongCP = { TY_LONG_CODE_PTR,  6,      TYPE_POINTER + TYPE_CODE };
 const type_def TNearCP = { TY_NEAR_CODE_PTR,  4,      TYPE_POINTER + TYPE_CODE };
 const type_def THugeP  = { TY_HUGE_POINTER,   6,      TYPE_POINTER };
 const type_def TLongP  = { TY_LONG_POINTER,   6,      TYPE_POINTER };
 const type_def TNearP  = { TY_NEAR_POINTER,   4,      TYPE_POINTER };
+#endif
 
 void    TargTypeInit( void )
 /**************************/

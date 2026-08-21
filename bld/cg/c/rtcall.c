@@ -98,7 +98,7 @@ instruction     *rMAKECALL( instruction *ins )
     HW_TurnOn( all_regs, tmp );
     tmp = LNReg();
     HW_TurnOn( all_regs, tmp );
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
     {
     tmp = ReturnReg( WD, false );
     HW_TurnOn( all_regs, tmp );

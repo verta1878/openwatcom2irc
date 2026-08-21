@@ -153,7 +153,7 @@ static  bool    ScanInstructions( void )
 }
 
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static  void    ChkFDOp( name *op, level_depth depth )
 /****************************************************/
 {
@@ -178,7 +178,7 @@ static  void    ChkFDOp( name *op, level_depth depth )
 #endif
 
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static  void    ScanForFDOps( void )
 /**********************************/
 {
@@ -208,7 +208,7 @@ static  void    ScanForFDOps( void )
 #endif
 
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static  block *ScanForLabelReturn( block *blk )
 /*********************************************/
 {
@@ -233,7 +233,7 @@ static  block *ScanForLabelReturn( block *blk )
 #endif
 
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static  bool    ScanLabelCalls( void )
 /*************************************
  * Make sure that all blocks that are called are only called
@@ -324,7 +324,7 @@ static void DoStackCheck( void )
 {
     if( CurrProc->prolog_state & (PST_PROLOG_THUNK | PST_PROLOG_RDOSDEV) )
         return;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( CurrProc->prolog_state & PST_GROW_STACK ) {
         if( BlockByBlock
           || CurrProc->locals.size >= 4096 ) {
@@ -419,7 +419,7 @@ static  void    EpilogHook( void )
 static  void    DoLoadDS( void )
 /******************************/
 {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsntTargetModel( CGSW_X86_LOAD_DS_DIRECTLY ) ) {
         DoRTCall( RT_GETDS, false );
     } else {
@@ -431,7 +431,7 @@ static  void    DoLoadDS( void )
         if( HW_COvlap( CurrProc->state.parm.used, HW_LOAD_DS ) ) {
             QuickSave( HW_LOAD_DS, OP_POP );
         }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     }
 #endif
 }
@@ -622,7 +622,7 @@ static  void    Enter( void )
     int         i;
 
     lex_level = CurrProc->lex_level;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( !CurrProc->targ.sp_frame
       && _CPULevel( CPU_186 )
       && CurrProc->locals.size < 65536
@@ -714,7 +714,11 @@ static  int Push( hw_reg_set to_push )
             break;
         if( HW_Ovlap( PushRegs[i], to_push ) ) {
             QuickSave( PushRegs[i], OP_PUSH );
+#if _TARGET & _TARG_X64
+            size += REG_SIZE;   /* x64: push is always 8 bytes */
+#else
             size += WORD_SIZE;
+#endif
             HW_TurnOff( to_push, PushRegs[i] );
         }
     }
@@ -827,7 +831,7 @@ static  void    DoEpilog( void )
 
     is_long = ( _RoutineIsLong( CurrProc->state.attr )
                 || _RoutineIsFar16( CurrProc->state.attr ) );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( CurrProc->prolog_state & PST_PROLOG_THUNK ) {
         QuickSave( HW_xSP, OP_POP );
     }
@@ -856,7 +860,17 @@ bool    CanZapBP( void )
 void    AddCacheRegs( void )
 /**************************/
 {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
+#if _TARGET & _TARG_X64
+    /* x64: GenProlog() always establishes an RBP frame (it forces
+     * ROUTINE_NEEDS_BP_CHAIN). Decide that HERE, before sp_frame can be
+     * selected, so parameter and local references are emitted against the
+     * frame register the prolog actually sets up. Leaving sp_frame on while
+     * the prolog builds an RBP frame makes stack parameters resolve against
+     * a moved RSP. */
+    CurrProc->state.attr |= ROUTINE_NEEDS_BP_CHAIN;
+    return;
+#endif
     if( CurrProc->targ.never_sp_frame )
         return;
     if( _IsntModel( CGSW_GEN_MEMORY_LOW_FAILS ) )
@@ -917,7 +931,11 @@ static unsigned returnAddressStackSize( void )
     } else if( _RoutineIsFar16( CurrProc->state.attr ) ) {
         size = 2 * WORD_SIZE;
     } else {
+#if _TARGET & _TARG_X64
+        size = REG_SIZE;    /* x64: return address is always 8 bytes */
+#else
         size = WORD_SIZE;
+#endif
     }
     return( size );
 }
@@ -933,6 +951,12 @@ void    GenProlog( void )
 
     ScanInstructions();     /* Do These 2 calls before using DO_WINDOWS_CRAP! */
     FindIfExported();
+#if _TARGET & _TARG_X64
+    /* x64: always use frame pointer. Without it, the CG may use EBP
+     * for local variable access without setting it up, causing crashes
+     * when the stack pointer is above 4GB. */
+    CurrProc->state.attr |= ROUTINE_NEEDS_BP_CHAIN;
+#endif
     PUSH_OP( AskCodeSeg() );
         if( CurrProc->prolog_state & PST_FUNCTION_NAME ) {
             EmitNameInCode();
@@ -954,7 +978,7 @@ void    GenProlog( void )
 
         origlabel = label = CurrProc->label;
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         if( _RoutineIsFar16( CurrProc->state.attr ) ) {
             label = GenFar16Thunk( CurrProc->label, CurrProc->parms.size,
                         CurrProc->state.attr & ROUTINE_REMOVES_PARMS );
@@ -970,7 +994,7 @@ void    GenProlog( void )
             GenRdosdevProlog();
         }
 
-    #if _TARGET & _TARG_80386
+    #if _TARGET & (_TARG_80386 | _TARG_X64)
         if( (attr & FE_NAKED) == 0 ) {
             if( _IsTargetModel( CGSW_X86_NEW_P5_PROFILING )
               || _IsTargetModel( CGSW_X86_P5_PROFILING ) ) {
@@ -992,6 +1016,12 @@ void    GenProlog( void )
 
         ret_size = returnAddressStackSize();
         CurrProc->parms.base += ret_size;
+#if _TARGET & _TARG_X64
+        /* x64: the prolog counts the pushed frame pointer as WORD_SIZE(4)
+         * while the real push is REG_SIZE(8). Add the shortfall so stack
+         * parameters land at [rbp+16] rather than [rbp+12]. */
+        CurrProc->parms.base += ( REG_SIZE - WORD_SIZE );
+#endif
         CalcUsedRegs();
 
         to_push = SaveRegs();
@@ -1031,7 +1061,11 @@ void    GenProlog( void )
                             }
     #endif
                             GenWindowsProlog();
-                            CurrProc->targ.base_adjust += 2; /* the extra push DS */
+        #if _TARGET & _TARG_X64
+                    CurrProc->targ.base_adjust += REG_SIZE;
+#else
+                    CurrProc->targ.base_adjust += 2; /* the extra push DS */
+#endif
                         }
                     } else {
                         QuickSave( HW_xBP, OP_PUSH );
@@ -1236,7 +1270,7 @@ int ParmsAtPrologue( void )
 
     parms_off_sp= 0;
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( CurrProc->prolog_state & PST_PROLOG_THUNK ) {
         parms_off_sp += WORD_SIZE;
     }

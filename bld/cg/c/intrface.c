@@ -139,7 +139,7 @@ cg_init_info _CGAPI     BEInitCg( cg_switches switches,
     if( !_CPULevel( CPU_386 ) ) {
         platform &= ~(CGSW_X86_FLOATING_FS | CGSW_X86_FLOATING_GS);
     }
-#elif  _TARGET & _TARG_80386
+#elif  _TARGET & (_TARG_80386 | _TARG_X64)
     if( !_CPULevel( CPU_386 ) ) {
         SET_CPU( proc, CPU_386 );
     }
@@ -168,7 +168,7 @@ cg_init_info _CGAPI     BEInitCg( cg_switches switches,
         cg_info.revision = II_REVISION;
 #if _TARGET & _TARG_8086
         cg_info.target = II_TARG_8086;
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
         cg_info.target = II_TARG_80386;
 #elif _TARGET & _TARG_370
         cg_info.target = II_TARG_370; /* NYI -- for now */
@@ -1488,7 +1488,10 @@ void _CGAPI     DGInteger( uint_32 value, cg_type tipe )
 {
     type_length len;
     int         i;
-    byte        buff[6];
+    /* x64: pointer types report TypeLength() == 8 (see 386type.c), and the
+     * loop below writes len bytes. A 6-byte buffer overflows for any 8-byte
+     * type. Sized to the largest type the loop can emit. */
+    byte        buff[16];
     byte        *form;
 
 #ifdef DEVBUILD
@@ -1505,7 +1508,7 @@ void _CGAPI     DGInteger( uint_32 value, cg_type tipe )
     }
     form = buff;
 #else
-    form = buff + 6;
+    form = buff + sizeof( buff );
     while( i < len ) {
         *--form = value & 0xff;
         value /= 256;

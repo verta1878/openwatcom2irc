@@ -17,9 +17,11 @@ bool X64CheckDispatch( void )
         const char *name = FEAuxInfo( NULL, FEINF_OBJECT_FILE_NAME );
         if( name != NULL ) {
             int len = strlen(name);
-            if( len > 2 && name[len-2] == '.' && name[len-1] == 'o' &&
-                (len < 4 || name[len-3] != 'b') ) {
-                /* Filename ends in .o but NOT .bjo — assume ELF target */
+            /* Exactly a ".o" suffix means ELF output. Testing the character
+             * before the dot was wrong: it rejected any name ending "b.o"
+             * (e.g. "glob.o") while ".obj" is already excluded by the final
+             * character test. */
+            if( len > 2 && name[len-2] == '.' && name[len-1] == 'o' ) {
                 x64_elf_active = true;
             }
         }

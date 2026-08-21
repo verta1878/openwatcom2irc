@@ -230,7 +230,7 @@ void    CVObjInitDbgInfo( void )
     #if _TARGET & _TARG_8086
         cptr->flags.f.Mode32 = false;
         cptr->machine = MACH_INTEL_8080;
-    #elif _TARGET & _TARG_80386
+    #elif _TARGET & (_TARG_80386 | _TARG_X64)
         cptr->machine = MACH_INTEL_80386;
         cptr->flags.f.Mode32 = true;
     #elif _TARGET & _TARG_AXP

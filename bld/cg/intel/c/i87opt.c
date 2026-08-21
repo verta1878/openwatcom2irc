@@ -315,7 +315,7 @@ static  int     FPPushDelay( pn parm, call_state *state )
                 Pushes( new_ins );
                 new_ins->num_operands = ins->num_operands;
                 AddIns( new_ins );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
                 if( state->attr & ROUTINE_STACK_RESERVE ) {
                     ReserveStack( state, new_ins, addr->tipe->length );
                 }

@@ -73,6 +73,7 @@ type_class_def  ReturnTypeClass( const type_def *tipe, call_attributes attr )
     case TY_HUGE_POINTER:
     case TY_LONG_CODE_PTR:
     case TY_LONG_POINTER:
+    case TY_POINTER:        /* openwatcom2irc: default pointer type → MapPointer */
         return( MapPointer( tipe->refno ) );
     case TY_SINGLE:
     case TY_DOUBLE:

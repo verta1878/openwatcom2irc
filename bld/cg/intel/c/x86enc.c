@@ -284,15 +284,25 @@ static void     TransferIns( void )
      * Single-byte INC r32 (0x40+r) → FF /0 r/m32
      * Single-byte DEC r32 (0x48+r) → FF /1 r/m32
      * Must happen BEFORE REX insertion since 0x40-0x4F would collide. */
-    if( x64_mode && ICur > 0 ) {
+    if( x64_mode && ICur == 1 ) {
+        /* Only a bare one-byte instruction can be the register form of
+         * INC/DEC. Guarding on ICur == 1 keeps us from mangling a 0x40-0x4F
+         * byte that is really a ModR/M or immediate of a longer instruction.
+         * The two-byte form is one byte longer, so grow the instruction. */
         if( Inst[KEY] >= 0x40 && Inst[KEY] <= 0x47 ) {
             byte reg = Inst[KEY] - 0x40;
             Inst[KEY] = 0xFF;
-            Inst[RMR] = ( reg << S_RMR_RM ) + RMR_MOD_REG; /* /0 = INC */
+            Inst[RMR] = ( reg << S_RMR_RM ) + RMR_MOD_REG;   /* /0 = INC */
+            ICur++;
+            ILen++;
+            if( IEsc < ICur ) IEsc = ICur;
         } else if( Inst[KEY] >= 0x48 && Inst[KEY] <= 0x4F ) {
             byte reg = Inst[KEY] - 0x48;
             Inst[KEY] = 0xFF;
             Inst[RMR] = ( 1 << S_RMR_REG ) | ( reg << S_RMR_RM ) | RMR_MOD_REG; /* /1 = DEC */
+            ICur++;
+            ILen++;
+            if( IEsc < ICur ) IEsc = ICur;
         }
     }
 
@@ -540,7 +550,7 @@ int     CountFPRegs( hw_reg_set regs )
     return( count );
 }
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static bool     NeedOpndSize( instruction *ins )
 /***********************************************
  * Do we REALLY, REALLY need the operand size override.
@@ -658,6 +668,19 @@ static  bool    LayOpndSize( instruction *ins, gentype gen )
         default:
             break;
         }
+#if _TARGET & _TARG_X64
+        /* x86-64: emit REX.W for 64-bit operand size, but ONLY for
+         * operations that actually use the operand-size-dependent encoding.
+         * Skip it for address stores (G_MC with constant address values)
+         * which are byte-sized MOV immediate instructions. */
+        if( ins->base_type_class == U8
+         || ins->base_type_class == I8
+         || ins->base_type_class == PT
+         || ins->base_type_class == CP ) {
+            AddToTemp( 0x48 );  /* REX.W */
+            return( true );
+        }
+#endif
         if( _IsTargetModel( CGSW_X86_USE_32 ) ) {
             if( ins->type_class == U2 || ins->type_class == I2 ) {
                 if( NeedOpndSize( ins ) ) {
@@ -940,7 +963,7 @@ static  void    DoP5Divide( instruction *ins )
     _Code;
     LayOpbyte( 0x9c );          /* pushf */
     _Emit;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     StackDepth += WORD_SIZE;
 #endif
     _Code;
@@ -991,7 +1014,7 @@ static  void    DoP5Divide( instruction *ins )
     _Code;
     LayOpbyte( 0x9d );          /* popf */
     _Emit;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     StackDepth -= WORD_SIZE;
 #endif
 }
@@ -1370,6 +1393,12 @@ static  void    AddSWCons( opcode_defs opcode, name *opnd, type_class_def type_c
         case I2:
         case U4:
         case I4:
+#if _TARGET & _TARG_X64
+        case U8:
+        case I8:
+        case PT:
+        case CP:
+#endif
             DoRelocConst( opnd, type_class );
             break;
         default:
@@ -1409,6 +1438,12 @@ void    AddWCons( name *op, type_class_def type_class )
         case I2:
         case U4:
         case I4:
+#if _TARGET & _TARG_X64
+        case U8:
+        case I8:
+        case PT:
+        case CP:
+#endif
             DoRelocConst( op, type_class );
             break;
         default:
@@ -1451,6 +1486,12 @@ static  void    AddSCons( name *op, type_class_def type_class )
         case I2:
         case U4:
         case I4:
+#if _TARGET & _TARG_X64
+        case U8:
+        case I8:
+        case PT:
+        case CP:
+#endif
             DoRelocConst( op, type_class );
             break;
         default:
@@ -2279,7 +2320,7 @@ void    GenObjCode( instruction *ins )
                 GenUnkLea( NextFramePatch() );
                 break;
             }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( ( left->n.class == N_TEMP ) && TmpLoc( DeAlias( left ), left ) == 0 ) {
                 /*
                  * turn "LEA <reg>,[ESP+0]" into "MOV <reg>,ESP"
@@ -2371,7 +2412,7 @@ void    GenObjCode( instruction *ins )
             break;
         case G_SIGNEX:
             switch( ins->type_class ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             case U8:
             case I8:
                 LayOpbyte( M_CWD );
@@ -2383,7 +2424,7 @@ void    GenObjCode( instruction *ins )
             case I4:
 #if _TARGET & _TARG_8086
                 LayOpbyte( M_CWD );
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
                 switch( ins->base_type_class ) {
                 case U1:
                 case I1:
@@ -2530,7 +2571,7 @@ void    GenObjCode( instruction *ins )
             } else {
                 LayOpword( M_MOVZX );
             }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( ins->operands[0]->n.size == 2 ) {
                 Inst[KEY] |= B_KEY_W;
             } else { /* base is byte */

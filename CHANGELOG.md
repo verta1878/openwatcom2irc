@@ -1,5 +1,39 @@
 # Changelog
 
+## r0.6.0 — additions & fixes (2026-08-20)
+
+No new feature surface vs r0.6.0 — additions and bug fixes on the same
+x86-64 backend. Kept at r0.6.0 intentionally.
+
+### Fixed (codegen correctness)
+- Jump-relocation scanner (x64obj.c): added a real x86 instruction-length
+  decoder (modrm_len/x86_insn_len). The relocation pass had walked
+  byte-by-byte and mistook a ModRM byte (0x7d) for a short JGE, silently
+  corrupting lea displacements. Root cause behind several intermittent
+  miscompiles (loops, in particular).
+- Frame-register / stack-parameter offsets (x86proc.c): x64 always uses an
+  RBP frame; parameter and local references now resolve correctly. Fixes
+  5+ argument functions read across an intervening call.
+- DGInteger buffer overflow (intrface.c): constant-emit buffer was byte[6],
+  overflowed on 8-byte pointer constants once pointers went 64-bit. Sized
+  to the largest emittable type. Found with ASan.
+- 8-byte pointers finalised (386type.c, 386ptype.c, targsys.h).
+- Prime-sieve test restored to expect the correct count (had been patched
+  to a wrong value to match a buggy build).
+
+### Added
+- tests/x64/run_tests.sh + 72 test cases — 61/61 x86-64 runtime tests.
+- bld/clib/linux/x64/ — freestanding crt0 and mini runtime.
+- Validated the backend against a large real-world codebase (a 3dfx Glide
+  SST-1 driver, ~23k lines). That driver work lives in a separate repo,
+  not here, keeping this a clean compiler toolchain.
+
+### Docs
+- README and INSTALL rewritten to current state (bwcc64 not bwcc386;
+  61/61; DOS target matrix). KNOWN-ISSUES updated: loops/recursion/globals
+  were marked open but are fixed.
+
+
 ## r0.3.0 — 2026-08-12
 
 **MILESTONE: First runnable x86_64 binary from OpenWatcom-family compiler.**

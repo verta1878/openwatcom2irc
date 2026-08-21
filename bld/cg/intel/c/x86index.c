@@ -295,7 +295,7 @@ void    FixMemRefs( void )
 
     for( blk = HeadBlock; blk != NULL; blk = blk->next_block ) {
         for( ins = blk->ins.head.next; ins->head.opcode != OP_BLOCK; ins = ins->head.next ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             ExpandThreadDataRef( ins );
 #endif
             NoMemIndex( ins );
@@ -323,7 +323,7 @@ void    FixSegments( void )
              * an error because the CS override is essentially a no-op.  MN
              */
 #define CGSW_X86_ANY_FLOATING (CGSW_X86_FLOATING_DS | CGSW_X86_FLOATING_ES | CGSW_X86_FLOATING_FS | CGSW_X86_FLOATING_GS)
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_ANY_FLOATING )
               && ins->num_operands > OpcodeNumOperands( ins )
               && !(_IsTargetModel( CGSW_X86_FLAT_MODEL )

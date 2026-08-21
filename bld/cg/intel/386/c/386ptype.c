@@ -74,11 +74,23 @@ type_class_def MapPointer( cg_type type )
     switch( type ) {
     case TY_NEAR_POINTER:
     case TY_NEAR_CODE_PTR:
+    case TY_POINTER:
+#if _TARGET & _TARG_X64
+        return( U4 );   /* x64: pointer uses U4 type class internally.
+                         * sizeof(void*)=8 from front end, but CG treats
+                         * pointers as 4-byte register values. REX.W at
+                         * encode time promotes to 64-bit. */
+#else
         return( U4 );
+#endif
     case TY_HUGE_POINTER:
     case TY_LONG_POINTER:
     case TY_LONG_CODE_PTR:
+#if _TARGET & _TARG_X64
+        return( U4 );   /* x64: no far pointers */
+#else
         return( CP );
+#endif
     default:
         _Zoiks( ZOIKS_127 );
         return( XX );

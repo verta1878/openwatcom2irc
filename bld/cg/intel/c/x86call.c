@@ -62,7 +62,7 @@
 
 static  void    AddCall( instruction *ins, cn call );
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static  void    Far16Parms( cn call )
 /***********************************/
 {
@@ -185,7 +185,7 @@ an      BGCall( cn call, bool use_return, bool aux_inline )
         HW_CTurnOn( state->parm.used, HW_DS );
     }
     if( _RoutineIsFar16( state->attr ) ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         Far16Parms( call );
 #endif
     } else {

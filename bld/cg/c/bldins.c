@@ -328,7 +328,7 @@ void    BG3WayControl( an node, label_handle lt, label_handle eq, label_handle g
     op = GenIns( node );
     BGDone( node );
     ins = NULL;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( type_class == FS ) {
         ins = MakeCondition( OP_BIT_TEST_FALSE, op, AllocS32Const( 0x7FFFFFFFL ), 0, 1, SW );
     }
@@ -344,7 +344,7 @@ void    BG3WayControl( an node, label_handle lt, label_handle eq, label_handle g
 
     EnLink( lbl );
     CurrBlock->edge[0].flags = BEF_BLOCK_LABEL_DIES;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( type_class == FS ) {
         type_class = SW;
     }

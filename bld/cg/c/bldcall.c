@@ -330,7 +330,7 @@ name    *DoParmDecl( cg_sym_handle sym, const type_def *tipe, hw_reg_set reg )
         parm_name->v.usage |= NEEDS_MEMORY | HAS_MEMORY | USE_MEMORY;
     } else {
         parm_name = AllocRegName( ActualParmReg( reg ) );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         if( CurrProc->state.attr & ROUTINE_STACK_RESERVE ) {
             /*
              * Just make sure we are taking up some space
@@ -526,7 +526,7 @@ void            PushParms( pn parm, call_state *state )
     }
 }
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 void    ReserveStack( call_state *state, instruction *prev, type_length len )
 /****************************************************************************
  * grab len bytes off the stack - doesn't matter what goes in there
@@ -603,7 +603,7 @@ void    ParmIns( pn parm, call_state *state )
                 AddIns( ins );
             }
 #endif
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( state->attr & ROUTINE_STACK_RESERVE ) {
                 /*
                  * this is for the stupid OS/2 _Optlink calling convention

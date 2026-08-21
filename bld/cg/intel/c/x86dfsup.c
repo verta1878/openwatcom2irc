@@ -112,7 +112,7 @@ void   DFOutReg( dw_loc_id locid, name *reg )
 #endif
 #if _TARGET & _TARG_8086
     hw_low = Low32Reg( hw_reg );
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
     hw_low = Low64Reg( hw_reg );
 #endif
     if( HW_CEqual( hw_low, HW_EMPTY ) ) {

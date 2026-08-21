@@ -36,6 +36,7 @@
 #include "freelist.h"
 #include "zoiks.h"
 #include "namelist.h"
+#include "targsys.h"
 #include "data.h"
 #include "seldef.h"
 #include "bldsel.h"
@@ -347,7 +348,6 @@ name    *SAllocMemory( pointer symbol, type_length offset, cg_class class,
     name        *new_m;
     name        *other;
     name        *xx;
-
     other = NULL;
     xx = NULL;
     for( new_m = Names[N_MEMORY]; new_m != NULL; new_m = new_m->m._v._n.next_name ) {

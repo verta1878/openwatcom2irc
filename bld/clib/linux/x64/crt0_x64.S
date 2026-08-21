@@ -34,7 +34,19 @@ _start:
 .global puts
 .type puts, @function
 puts:
-    /* puts(const char *s) — Watcom register convention: arg1 in EAX */
+    /* puts(const char *s) — Watcom register convention: arg1 in EAX.
+     * Under this convention EAX is the only scratch register: the compiler
+     * keeps locals in EDX/EBX/ECX across calls, so a callee must preserve
+     * everything but EAX. These stubs make raw syscalls, which clobber RSI/RDI/RCX/R11,
+     * so the preserved set must be saved explicitly. Without this a caller
+     * holding a pointer in one of those registers across a call — walking a
+     * linked list, for instance — resumed with a corrupted value. */
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %r11
     movq %rax, %rsi         /* buf = string pointer from EAX */
     /* Find string length */
     xorq %rdx, %rdx         /* count = 0 */
@@ -55,6 +67,12 @@ puts:
     movq $1, %rax           /* __NR_write */
     syscall
     addq $8, %rsp
+    popq %r11
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
     xorl %eax, %eax         /* return 0 */
     ret
 
@@ -94,5 +112,62 @@ __CHK:
 _cstart:
     /* Watcom startup — redirect to _start */
     jmp _start
+
+/* Watcom 64-bit integer helpers. The compiler emits calls to these for
+ * long long operations; clib normally supplies them and this freestanding
+ * runtime does not have it.
+ *
+ * The ABI was read off the generated code rather than assumed: the value
+ * arrives in EDX:EAX (EDX high) and the shift count in ECX:EBX (a 64-bit
+ * count, low half in EBX), with the result returned in EDX:EAX. An earlier
+ * version of these stubs took the count in CL and silently returned wrong
+ * answers, which is worse than not providing them at all. */
+.global __I8RS
+.type __I8RS, @function
+__I8RS:                     /* signed  EDX:EAX >>= EBX */
+    movl  %ebx, %ecx
+    cmpb  $32, %cl
+    jae   .I8RS_big
+    shrdl %cl, %edx, %eax
+    sarl  %cl, %edx
+    ret
+.I8RS_big:
+    movl  %edx, %eax
+    sarl  $31, %edx
+    subb  $32, %cl
+    sarl  %cl, %eax
+    ret
+
+.global __U8RS
+.type __U8RS, @function
+__U8RS:                     /* unsigned EDX:EAX >>= EBX */
+    movl  %ebx, %ecx
+    cmpb  $32, %cl
+    jae   .U8RS_big
+    shrdl %cl, %edx, %eax
+    shrl  %cl, %edx
+    ret
+.U8RS_big:
+    movl  %edx, %eax
+    xorl  %edx, %edx
+    subb  $32, %cl
+    shrl  %cl, %eax
+    ret
+
+.global __I8LS
+.type __I8LS, @function
+__I8LS:                     /* EDX:EAX <<= EBX */
+    movl  %ebx, %ecx
+    cmpb  $32, %cl
+    jae   .I8LS_big
+    shldl %cl, %eax, %edx
+    shll  %cl, %eax
+    ret
+.I8LS_big:
+    movl  %eax, %edx
+    xorl  %eax, %eax
+    subb  $32, %cl
+    shll  %cl, %edx
+    ret
 
 .section .note.GNU-stack,"",@progbits

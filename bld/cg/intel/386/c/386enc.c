@@ -553,7 +553,14 @@ void    DoRelocConst( name *op, type_class_def type_class )
             AddByte( 0 );
         }
     } else if( op->c.const_type == CONS_ADDRESS ) {
+#if _TARGET & _TARG_X64
+        /* On x64, a pointer-sized address constant is 4 bytes (U4)
+         * after the type_class remap. Emit it as a relocatable 32-bit
+         * value — the linker will resolve it. */
+        DoSymRef( op->c.u.op, (int_32)op->c.lo.u.int_value, false );
+#else
         _Zoiks( ZOIKS_045 );
+#endif
     }
 }
 

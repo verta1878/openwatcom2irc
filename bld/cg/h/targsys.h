@@ -40,8 +40,9 @@
 #define _TARG_PPC       8
 #define _TARG_AXP       16
 #define _TARG_MIPS      32
+#define _TARG_X64       64
 
-#define _TARGET_INTEL   (_TARGET & (_TARG_80386 | _TARG_8086))
+#define _TARGET_INTEL   (_TARGET & (_TARG_80386 | _TARG_8086 | _TARG_X64))
 #define _TARGET_RISC    (_TARGET & (_TARG_PPC | _TARG_AXP | _TARG_MIPS))
 
 /*  target character sets (_CSET) */
@@ -65,6 +66,16 @@
     #define WORD_SIZE           2
     #define REG_SIZE            2
     #define TY_WORD             TY_UINT_2
+#elif _TARGET & _TARG_X64
+    #define _TARG_CSET          _TARG_ASCII
+    #define _TARG_INTEGER       32
+    #define _TARG_IS_SEGMENTED  0       /* x64: flat model, no segments */
+    #define _TARG_MEMORY        _TARG_LOW_FIRST
+    #define WD                  U4
+    #define SW                  I4
+    #define WORD_SIZE           4
+    #define REG_SIZE            8       /* x64: push/call use 8-byte stack slots */
+    #define TY_WORD             TY_UINT_4
 #elif _TARGET & _TARG_80386
     #define _TARG_CSET          _TARG_ASCII
     #define _TARG_INTEGER       32
@@ -121,6 +132,18 @@
     #define REG_SIZE            8
     #define _TARGET_PAGE_SIZE   4096            /* for stack crawling */
     #define TY_WORD             TY_UINT_4
+    #define STACK_ALIGNMENT     16
+#elif _TARGET & _TARG_X64
+    #define _TARG_CSET          _TARG_ASCII
+    #define _TARG_INTEGER       64
+    #define _TARG_IS_SEGMENTED  0
+    #define _TARG_MEMORY        _TARG_LOW_FIRST
+    #define WD                  U8
+    #define SW                  I8
+    #define WORD_SIZE           8
+    #define REG_SIZE            8
+    #define _TARGET_PAGE_SIZE   4096
+    #define TY_WORD             TY_UINT_8
     #define STACK_ALIGNMENT     16
 #else
     #error Unknown target processor!

@@ -388,10 +388,17 @@ static const reg_set_index  ClassSets[] = {
     RL_SEG,                 /* I2 */ /* (put segs here so their size is OK) */
     RL_DOUBLE,              /* U4 */
     RL_DX_AX,               /* I4 */ /* for IDIV instructions */
+#if _TARGET & _TARG_X64
+    RL_DOUBLE,              /* U8 — x64: single GPR, not EDX:EAX pair */
+    RL_DOUBLE,              /* I8 — x64: single GPR */
+    RL_DOUBLE,              /* CP — x64: near pointer in single GPR */
+    RL_DOUBLE,              /* PT — x64: pointer in single GPR */
+#else
     RL_8,                   /* U8 */
     RL_8,                   /* I8 */
     RL_FAR_POINTER,         /* CP */
     RL_,                    /* PT */
+#endif
     RL_,                    /* FS */
     RL_8,                   /* FD */
     __FP80BIT(RL_,RL_8),    /* FL */
@@ -408,10 +415,17 @@ static const hw_reg_set     * const ParmSets[] = {
     WordRegs,               /* I2 */
     DoubleParmRegs,         /* U4 */
     DoubleParmRegs,         /* I4 */
+#if _TARGET & _TARG_X64
+    DoubleParmRegs,         /* U8 — x64: single GPR */
+    DoubleParmRegs,         /* I8 — x64: single GPR */
+    DoubleParmRegs,         /* CP — x64: near pointer */
+    DoubleParmRegs,         /* PT — x64: pointer */
+#else
     QuadReg,                /* U8 */
     QuadReg,                /* I8 */
     FarPointerRegs,         /* CP */
     FarPointerRegs,         /* PT */
+#endif
     DoubleParmRegs,         /* FS */
     QuadReg,                /* FD */
     Empty,                  /* FL */
@@ -429,10 +443,17 @@ static const hw_reg_set     * const ParmSets8087[] = {
     WordRegs,               /* I2 */
     DoubleParmRegs,         /* U4 */
     DoubleParmRegs,         /* I4 */
+#if _TARGET & _TARG_X64
+    DoubleParmRegs,         /* U8 — x64: single GPR */
+    DoubleParmRegs,         /* I8 — x64: single GPR */
+    DoubleParmRegs,         /* CP — x64: near pointer */
+    DoubleParmRegs,         /* PT — x64: pointer */
+#else
     QuadReg,                /* U8 */
     QuadReg,                /* I8 */
     FarPointerRegs,         /* CP */
     FarPointerRegs,         /* PT */
+#endif
     STParmReg,              /* FS */
     STParmReg,              /* FD */
     STParmReg,              /* FL */
@@ -449,10 +470,17 @@ static const reg_set_index  IsSets[] = {
     RL_WORD,                /* I2 */
     RL_DOUBLE,              /* U4 */
     RL_DOUBLE,              /* I4 */
+#if _TARGET & _TARG_X64
+    RL_DOUBLE,              /* U8 — x64: single GPR */
+    RL_DOUBLE,              /* I8 — x64: single GPR */
+    RL_DOUBLE,              /* CP — x64: near pointer */
+    RL_DOUBLE,              /* PT — x64: pointer */
+#else
     RL_8,                   /* U8 */
     RL_8,                   /* I8 */
     RL_FAR_POINTER,         /* CP */
     RL_FAR_POINTER,         /* PT */
+#endif
     RL_DOUBLE,              /* FS */
     RL_8,                   /* FD */
     RL_,                    /* FL */

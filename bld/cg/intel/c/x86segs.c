@@ -84,7 +84,7 @@ hw_reg_set      CalcSegment( cg_sym_handle sym, cg_class class ) {
         FEMessage( FEMSG_BAD_PEG_REG, AskForLblSym( CurrProc->label ) );
     }
     if( class == CG_FE && (attr & FE_PROC) && (attr & FE_DLLIMPORT) == 0 ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         if( _IsTargetModel( CGSW_X86_FLAT_MODEL ) )
             return( HW_CS ); /* all have same CS */
         if( AskCodeSeg() == segid ) {
@@ -292,9 +292,11 @@ cg_type NamePtrType( name *op ) {
     segment_id  segid;
 
     if( op->n.class == N_INDEXED ) {
+#if _TARG_IS_SEGMENTED
         if( op->i.index->n.class != N_CONSTANT
           && op->i.index->n.size != WORD_SIZE )
             return( true );
+#endif
         if( op->i.base != NULL )
             return( SegOver( op->i.base ) );
         if( _IsTargetModel( CGSW_X86_FLOATING_DS ) ) {

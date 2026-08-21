@@ -181,7 +181,7 @@ bool    DoVerify( vertype kind, instruction *ins )
         if( op2->c.const_type != CONS_ABSOLUTE )
             return( false );
         switch( ins->head.opcode ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         case OP_MUL:
             switch( op2->c.lo.u.int_value ) {
             case 3:
@@ -393,7 +393,7 @@ bool    DoVerify( vertype kind, instruction *ins )
             return( true );
         if( ins->head.opcode == OP_CMP_NOT_EQUAL )
             return( true );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         // rINTCOMP reductions for 16-bit need work to handle < and >
         // comparisons - not worth it for now - BBB Apr 24, 1995
         if( ins->type_class != FS )

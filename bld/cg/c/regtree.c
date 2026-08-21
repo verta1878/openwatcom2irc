@@ -39,6 +39,7 @@
 #include "rgtbl.h"
 #include "conflict.h"
 #include "regtree.h"
+#include "targsys.h"
 
 
 static  pointer         *RegFrl;

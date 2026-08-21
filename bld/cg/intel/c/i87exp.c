@@ -573,7 +573,7 @@ static  instruction     *ExpPush( instruction *ins, operand_type op )
             ins = pop_ins;
         }
     }
-#elif _TARGET & _TARG_80386
+#elif _TARGET & (_TARG_80386 | _TARG_X64)
     {
         index = AllocIndex( sp, NULL, 0, ins->type_class );
         new_ins = MakeMove( ins->operands[0], index,ins->type_class );

@@ -67,6 +67,7 @@
 extern bool X64CheckDispatch( void );
 extern bool X64IsActive( void );
 extern void X64ObjInit( void );
+extern void X64EncInit( bool );
 extern void X64ObjFini( void );
 #include "x64obj.h"
 
@@ -182,7 +183,7 @@ static  omf_idx         FPPatchImp[FPP_NUMBER_OF_TYPES];
 static  int             segmentCount;
 static  bool            NoDGroup;
 static  short           CurrFNo;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
 static  omf_idx         FlatGIndex;
 static  omf_idx         FlatNIndex;
 #endif
@@ -220,7 +221,7 @@ void    InitSegDefs( void )
     GroupIndex = 0;
     DGroupIndex = 0;
     TLSGIndex = 0;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     FlatGIndex = 0;
 #endif
     segmentCount = 0;
@@ -404,7 +405,7 @@ static  byte    SegmentAttr( byte align, seg_attr tipe, bool use_16 )
         attr = SEG_ALGN_BYTE;
     } else if( align <= 2 ) {
         attr = SEG_ALGN_WORD;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     } else if( align <= 4 ) {
         attr = SEG_ALGN_DWORD;
 #endif
@@ -416,7 +417,7 @@ static  byte    SegmentAttr( byte align, seg_attr tipe, bool use_16 )
     /*
      * align is a byte - how can it be bigger than 4k - BBB
      */
-  #if _TARGET & _TARG_80386
+  #if _TARGET & (_TARG_80386 | _TARG_X64)
         if( _IsTargetModel( CGSW_X86_EZ_OMF ) ) {
             if( align > 256 ) {
                 attr = SEG_ALGN_4K;
@@ -432,7 +433,7 @@ static  byte    SegmentAttr( byte align, seg_attr tipe, bool use_16 )
     } else { /* normal or a kludge for wsl front end ( PRIVATE | GLOBAL )*/
         attr |= SEG_COMB_NORMAL;
     }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
         if( _IsTargetModel( CGSW_X86_USE_32 ) ) {
             if( !use_16 ) {
@@ -615,7 +616,7 @@ static  void    DoASegDef( index_rec *rec, bool use_16 )
     rec->obj = obj = InitTarg( rec );
     obj_data = &obj->data;
     OutByte( rec->attr, obj_data );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     OutOffset( 0, obj_data );           /* segment size (for now) */
 #else /* SEG32DBG dwarf, codeview */
     if( rec->attr & SEG_USE_32 ) {
@@ -627,7 +628,7 @@ static  void    DoASegDef( index_rec *rec, bool use_16 )
     OutIdx( rec->nidx, obj_data );      /* segment name index */
     OutIdx( rec->cidx, obj_data );      /* class name index */
     OutIdx( _NIDX_NULL, obj_data );     /* overlay name index */
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsTargetModel( CGSW_X86_EZ_OMF ) ) {
         if( _IsntTargetModel( CGSW_X86_USE_32 ) || use_16 ) {
             OutByte( 2, obj_data );     /* to indicate USE16 EXECUTE/READ */
@@ -639,7 +640,7 @@ static  void    DoASegDef( index_rec *rec, bool use_16 )
     if( ++segmentCount > 32000 ) {
         FatalError( "too many segments" );
     }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
         cmd = CMD_SEGDEF32;
     } else {
@@ -1069,7 +1070,7 @@ static  void    DoSegGrpNames( array_control *dgroup_def, array_control *tgroup_
     GetNameIdx( "BSS", "" );    /* _NIDX_BSS */
     GetNameIdx( "TLS", "" );    /* _NIDX_TLS */
 
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsTargetModel( CGSW_X86_FLAT_MODEL )
       && _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
         FlatNIndex = GetNameIdx( "FLAT", "" );
@@ -1196,6 +1197,8 @@ void    ObjInit( void )
         /* Initialize OWL alongside OMF — OMF state needed by cg internals */
         /* Bytes redirect through OutDBytes → X64OutDBytes → OWLEmitData */
         X64ObjInit();
+        /* Enable x86_64 encoding rules (INC/DEC remap, REX) for this module. */
+        X64EncInit( true );
         /* Fall through to OMF init so cg state is properly set up */
     }
 #endif
@@ -1217,7 +1220,7 @@ void    ObjInit( void )
     OutName( FEAuxInfo( NULL, FEINF_SOURCE_NAME ), names );
     PutObjOMFRec( CMD_THEADR, names );
 #endif
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsTargetModel( CGSW_X86_EZ_OMF )
       || _IsTargetModel( CGSW_X86_FLAT_MODEL ) ) {
         OutShort( PHARLAP_OMF_COMMENT, names );
@@ -1286,7 +1289,7 @@ void    ObjInit( void )
         PutObjOMFRec( CMD_GRPDEF, tgroup_def );
     }
     KillArray( tgroup_def );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsTargetModel( CGSW_X86_FLAT_MODEL )
       && _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
         FlatGIndex = ++GroupIndex;
@@ -1511,7 +1514,7 @@ static void     EjectLEData( void )
         SetAbsPatches();
         obj_data = &CurrSeg->obj->data;
         if( CurrSeg->comdat_label != NULL ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_COMDAT32;
             } else {
@@ -1521,7 +1524,7 @@ static void     EjectLEData( void )
             cmd = CMD_COMDAT;
 #endif
         } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_LEDATA32;
             } else {
@@ -1543,7 +1546,7 @@ static void     EjectLEData( void )
                 OutByte( LDIR_OPT_UNSAFE, obj_data );
                 PutObjOMFRec( CMD_COMENT, obj_data );
             }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_FIXUPP32;
             } else {
@@ -1589,7 +1592,7 @@ void    OutSelect( bool starts )
             EjectLEData();
             obj_data = &CurrSeg->obj->data;
             OutShort( DISASM_COMMENT, obj_data );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             OutByte( DDIR_SCAN_TABLE_32, obj_data );
 #else
             OutByte( DDIR_SCAN_TABLE, obj_data );
@@ -1640,7 +1643,7 @@ static  void    OutLEDataStart( bool iterated )
             OutIdx( NeedComdatNidx( NORMAL ), obj_data );
         } else { /* LEDATA */
             OutIdx( CurrSeg->sidx, obj_data );
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             OutOffset( (offset)CurrSeg->location, obj_data );
 #else /* SEG32DBG dwarf, codeview */
             if( CurrSeg->attr & SEG_USE_32 ) {
@@ -1801,7 +1804,7 @@ static  void    EjectExports( void )
 
     if( CurrSeg->obj->exports.used > 0 ) {
         if( CurrSeg->obj->gen_static_exports ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_LPUBDEF32;
             } else {
@@ -1811,7 +1814,7 @@ static  void    EjectExports( void )
             cmd = CMD_LPUBDEF;
 #endif
         } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_PUBDEF32;
             } else {
@@ -1835,7 +1838,7 @@ static  void    FlushLineNum( object *obj )
         OutShort( obj->last_line, obj->lines );
         OutOffset( obj->last_offset, obj->lines );
         if( CurrSeg->comdat_label != NULL ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_LINSYM32;
             } else {
@@ -1845,7 +1848,7 @@ static  void    FlushLineNum( object *obj )
             cmd = CMD_LINSYM;
 #endif
         } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_LINNUM32;
             } else {
@@ -1924,7 +1927,7 @@ static  void    FiniTarg( void )
         attr = rec->attr | SEG_BIG;
         PatchObj( obj->segfix, SEGDEF_ATTR, &attr, sizeof( attr ) );
     } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         size_s = _TargetInt( size_l );
         PatchObj( obj->segfix, SEGDEF_SIZE, (byte *)&size_s, sizeof( size_s ) );
 #else /* SEG32DBG dwarf, codeview */
@@ -1944,9 +1947,6 @@ static  void    FiniTarg( void )
 }
 
 void    FlushOP( segment_id segid )
-{
-}
-void    FlushOP_real( segment_id segid )
 /*********************************/
 {
     index_rec   *rec;
@@ -2100,7 +2100,7 @@ static  void    EndModule( void )
      * features provided by the 32-bit form anyway.
      */
 #if 0
- #if _TARGET & _TARG_80386
+ #if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
         cmd = CMD_MODEND32;
     } else {
@@ -2294,7 +2294,7 @@ static  void    OutExport( cg_sym_handle sym )
         if( CurrSeg->btype == BASE_GRP ) {
             OutIdx( CurrSeg->base, obj_exports );   /* group index*/
         } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             OutIdx( FlatGIndex, obj_exports );      /* will be 0 if we have none */
 #else
             OutIdx( 0, obj_exports );
@@ -2498,10 +2498,6 @@ void    OutDLLExport( uint words, cg_sym_handle sym )
 
 
 void    OutLabel( label_handle lbl )
-{
-
-}
-void    OutLabel_real( label_handle lbl )
 /**********************************/
 {
     temp_patch          **owner;
@@ -2632,7 +2628,7 @@ void    *InitPatches( void )
 static omf_fix_loc getOMFFixLoc( fix_class class )
 /************************************************/
 {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( class & F_FAR16 ) {
         /* want a 16:16 fixup for a __far16 call */
         return( LOC_BASE_OFFSET );
@@ -2708,7 +2704,7 @@ static void DoFix( omf_idx idx, bool rel, base_type base, fix_class class, omf_i
             base = BASE_IMP;
         }
     }
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
     if( _IsTargetModel( CGSW_X86_FLAT_MODEL )
       && _IsntTargetModel( CGSW_X86_EZ_OMF )
       && ( F_CLASS( class ) != F_PTR ) ) {
@@ -3026,9 +3022,6 @@ void    OutAbsPatch( abs_patch *apatch, patch_attr attr )
 
 
 void    OutReloc( segment_id segid, fix_class class, bool rel )
-{
-}
-void    OutReloc_real( segment_id segid, fix_class class, bool rel )
 /*************************************************************/
 {
     index_rec   *rec;
@@ -3059,7 +3052,7 @@ void    OutImport( cg_sym_handle sym, fix_class class, bool rel )
 
 
     attr = FEAttr( sym );
-#if  _TARGET & _TARG_80386
+#if  _TARGET & (_TARG_80386 | _TARG_X64)
     if( !rel && F_CLASS( class ) == F_OFFSET && (attr & FE_PROC) ) {
         if( (call_class_target)(pointer_uint)FindAuxInfoSym( sym, FEINF_CALL_CLASS_TARGET ) & FECALL_X86_FAR16_CALL ) {
             class |= F_FAR16;
@@ -3111,7 +3104,7 @@ void    OutBckExport( const char *name, bool is_export )
         if( CurrSeg->btype == BASE_GRP ) {
             OutIdx( CurrSeg->base, obj_exports );   /* group index*/
         } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             OutIdx( FlatGIndex, obj_exports );      /* will be 0 if we have none */
 #else
             OutIdx( 0, obj_exports );
@@ -3213,7 +3206,7 @@ void    OutIBytes( byte pattern, offset len )
         EjectLEData();
         OutLEDataStart( true );
         obj_data = &CurrSeg->obj->data;
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
         if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
             OutOffset( len, obj_data );         /* repeat count */
         } else {
@@ -3226,7 +3219,7 @@ void    OutIBytes( byte pattern, offset len )
         OutByte( 1, obj_data );                 /* pattern length */
         OutByte( pattern, obj_data );
         if( CurrSeg->comdat_label != NULL ) {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_COMDAT32;
             } else {
@@ -3236,7 +3229,7 @@ void    OutIBytes( byte pattern, offset len )
             cmd = CMD_COMDAT;
 #endif
         } else {
-#if _TARGET & _TARG_80386
+#if _TARGET & (_TARG_80386 | _TARG_X64)
             if( _IsntTargetModel( CGSW_X86_EZ_OMF ) ) {
                 cmd = CMD_LIDATA32;
             } else {
